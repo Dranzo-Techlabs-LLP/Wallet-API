@@ -13,6 +13,11 @@ export class CreateUserDto {
     @IsOptional()
     max_credits?: number;
 
+    @IsString()
+    @IsOptional()
+    Webuddy_name?: string;
+
+
     @IsObject()
     @IsOptional()
     settings?: Record<string, any>;

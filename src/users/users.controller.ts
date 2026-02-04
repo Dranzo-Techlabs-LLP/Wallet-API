@@ -12,13 +12,13 @@ export class UsersController {
         return this.usersService.create(createUserDto);
     }
 
-    @Get(':id')
-    findOne(@Param('id') id: string) {
-        return this.usersService.findOne(id);
+    @Get(':Webuddy_name')
+    findOne(@Param('Webuddy_name') Webuddy_name: string) {
+        return this.usersService.findOne(Webuddy_name);
     }
 
-    @Patch(':id')
-    update(@Param('id') id: string, @Body() updateUserDto: UpdateUserDto) {
-        return this.usersService.update(id, updateUserDto);
+    @Patch(':Webuddy_name')
+    update(@Param('Webuddy_name') Webuddy_name: string, @Body() updateUserDto: UpdateUserDto) {
+        return this.usersService.update(Webuddy_name, updateUserDto);
     }
 }

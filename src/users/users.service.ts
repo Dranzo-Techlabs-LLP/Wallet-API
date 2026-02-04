@@ -17,19 +17,19 @@ export class UsersService {
         return this.usersRepository.save(user);
     }
 
-    async findOne(id: string): Promise<User> {
-        const user = await this.usersRepository.findOne({ where: { id } });
+    async findOne(Webuddy_name: string): Promise<User> {
+        const user = await this.usersRepository.findOne({ where: { Webuddy_name } });
         if (!user) {
-            throw new NotFoundException(`User with ID ${id} not found`);
+            throw new NotFoundException(`User with Webuddy_name ${Webuddy_name} not found`);
         }
         return user;
     }
 
-    async update(id: string, updateUserDto: UpdateUserDto): Promise<User> {
-        await this.findOne(id);
+    async update(Webuddy_name: string, updateUserDto: UpdateUserDto): Promise<User> {
+        await this.findOne(Webuddy_name);
 
-        await this.usersRepository.update(id, updateUserDto);
+        await this.usersRepository.update({ Webuddy_name }, updateUserDto);
 
-        return this.findOne(id);
+        return this.findOne(Webuddy_name);
     }
 }

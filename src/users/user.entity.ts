@@ -21,6 +21,9 @@ export class User {
     @Column({ type: 'json', nullable: true })
     settings: Record<string, any>;
 
+    @Column({ nullable: true, unique: true })
+    Webuddy_name: string;
+
     @CreateDateColumn()
     createdAt: Date;
 

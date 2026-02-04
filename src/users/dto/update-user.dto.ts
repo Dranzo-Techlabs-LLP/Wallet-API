@@ -14,6 +14,11 @@ export class UpdateUserDto {
     name?: string;
 
     @IsOptional()
+    @IsString()
+    Webuddy_name?: string;
+
+
+    @IsOptional()
     @IsObject()
     settings?: Record<string, any>;
 }
