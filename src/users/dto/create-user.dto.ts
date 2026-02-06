@@ -2,7 +2,7 @@ import { IsString, IsNotEmpty, IsOptional, IsNumber, IsObject } from 'class-vali
 
 export class CreateUserDto {
     @IsString()
-    @IsNotEmpty()
+    @IsOptional()
     phoneNumber: string;
 
     @IsString()
