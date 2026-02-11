@@ -1,9 +1,9 @@
-import { IsString, IsNotEmpty, IsOptional, IsNumber, IsObject } from 'class-validator';
+import { IsString, IsOptional, IsNumber, IsObject } from 'class-validator';
 
 export class CreateUserDto {
-    @IsString()
     @IsOptional()
-    phoneNumber: string;
+    @IsString()
+    phoneNumber?: string;
 
     @IsString()
     @IsOptional()
