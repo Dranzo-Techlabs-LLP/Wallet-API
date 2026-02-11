@@ -28,7 +28,8 @@ import { PayoutsModule } from './payouts/payouts.module';
                 password: configService.get<string>('DB_PASSWORD'),
                 database: configService.get<string>('DB_NAME'),
                 entities: [User, Expert, BankDetail, Session, Transaction],
-                synchronize: true,
+                synchronize: false,
+                logging: true
             }),
         }),
         UsersModule,

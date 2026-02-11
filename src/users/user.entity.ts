@@ -16,13 +16,13 @@ export class User {
 
     // Additional profile fields
     @Column({ nullable: true })
-    name: string;
+    name?: string;
 
     @Column({ type: 'json', nullable: true })
-    settings: Record<string, any>;
+    settings?: Record<string, any>;
 
     @Column({ nullable: true, unique: true })
-    Webuddy_name: string;
+    Webuddy_name?: string;
 
     @CreateDateColumn()
     createdAt: Date;
