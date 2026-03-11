@@ -15,9 +15,11 @@ export class ExpertsService {
     ) { }
 
     async addBankDetail(dto: AddBankDetailDto): Promise<BankDetail> {
-        const expert = await this.expertsRepository.findOne({ where: { id: dto.expertId } });
-        if (!expert) {
-            throw new NotFoundException(`Expert with ID ${dto.expertId} not found`);
+        if (dto.expertId) {
+            const expert = await this.expertsRepository.findOne({ where: { id: dto.expertId } });
+            if (!expert) {
+                throw new NotFoundException(`Expert with ID ${dto.expertId} not found`);
+            }
         }
 
         const bankDetail = this.bankDetailsRepository.create(dto);

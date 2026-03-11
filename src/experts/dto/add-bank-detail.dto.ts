@@ -3,7 +3,7 @@ import { IsString, IsNotEmpty, IsOptional } from 'class-validator';
 export class AddBankDetailDto {
     @IsString()
     @IsOptional()
-    expertId: string;
+    expertId?: string;
 
     @IsString()
     @IsNotEmpty()
