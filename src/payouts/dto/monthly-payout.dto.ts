@@ -1,9 +1,9 @@
-import { IsString, IsNotEmpty, IsNumber, Min } from 'class-validator';
+import { IsString, IsNotEmpty, IsNumber, Min, IsOptional } from 'class-validator';
 
 export class MonthlyPayoutDto {
     @IsString()
-    @IsNotEmpty()
-    expertId: string;
+    @IsOptional()
+    expertId?: string;
 
     @IsString()
     @IsNotEmpty()

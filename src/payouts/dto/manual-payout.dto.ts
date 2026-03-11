@@ -1,10 +1,10 @@
-import { IsString, IsNotEmpty, IsNumber, Min, IsEnum } from 'class-validator';
+import { IsString, IsNotEmpty, IsNumber, Min, IsEnum, IsOptional } from 'class-validator';
 import { PaymentMethod } from '../../wallet/dto/recharge-wallet.dto'; // Reuse or redefine
 
 export class ManualPayoutDto {
     @IsString()
-    @IsNotEmpty()
-    expertId: string;
+    @IsOptional()
+    expertId?: string;
 
     @IsNumber()
     @Min(1)

@@ -6,8 +6,8 @@ export class StartSessionDto {
     userId: string;
 
     @IsString()
-    @IsNotEmpty()
-    expertId: string;
+    @IsOptional()
+    expertId?: string;
 
     @IsNumber()
     @Min(0)
