@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, Connection, LessThan } from 'typeorm';
-import { PendingHold } from './pending-hold.entity';
+import { PendingHold } from '../pending-holds/pending-hold.entity';
 import { User } from '../users/user.entity';
 
 @Injectable()

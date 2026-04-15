@@ -19,16 +19,16 @@ export class PendingHoldsController {
 
     @Get(':id')
     findOne(@Param('id') id: string) {
-        return this.pendingHoldsService.findOne(id);
+        return this.pendingHoldsService.findOne(+id);
     }
 
     @Patch(':id')
     update(@Param('id') id: string, @Body() updatePendingHoldDto: UpdatePendingHoldDto) {
-        return this.pendingHoldsService.update(id, updatePendingHoldDto);
+        return this.pendingHoldsService.update(+id, updatePendingHoldDto);
     }
 
     @Delete(':id')
     remove(@Param('id') id: string) {
-        return this.pendingHoldsService.remove(id);
+        return this.pendingHoldsService.remove(+id);
     }
 }

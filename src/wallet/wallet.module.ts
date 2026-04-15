@@ -4,7 +4,7 @@ import { WalletService } from './wallet.service';
 import { WalletController } from './wallet.controller';
 import { User } from '../users/user.entity';
 import { Transaction } from '../transactions/transaction.entity';
-import { PendingHold } from './pending-hold.entity';
+import { PendingHold } from '../pending-holds/pending-hold.entity';
 import { PendingHoldsCronService } from './pending-holds-cron.service';
 import { CronController } from './cron.controller';
 import { PayoutsModule } from '../payouts/payouts.module';

@@ -21,7 +21,7 @@ export class PendingHoldsService {
         return await this.pendingHoldRepository.find();
     }
 
-    async findOne(id: string): Promise<PendingHold> {
+    async findOne(id: number): Promise<PendingHold> {
         const hold = await this.pendingHoldRepository.findOne({ where: { id } });
         if (!hold) {
             throw new NotFoundException(`PendingHold with ID ${id} not found`);
@@ -29,13 +29,13 @@ export class PendingHoldsService {
         return hold;
     }
 
-    async update(id: string, updateDto: UpdatePendingHoldDto): Promise<PendingHold> {
+    async update(id: number, updateDto: UpdatePendingHoldDto): Promise<PendingHold> {
         const hold = await this.findOne(id);
         Object.assign(hold, updateDto);
         return await this.pendingHoldRepository.save(hold);
     }
 
-    async remove(id: string): Promise<void> {
+    async remove(id: number): Promise<void> {
         const hold = await this.findOne(id);
         await this.pendingHoldRepository.remove(hold);
     }

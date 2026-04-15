@@ -1,4 +1,4 @@
-import { IsString, IsBoolean, IsOptional } from 'class-validator';
+import { IsString, IsNumber, IsOptional } from 'class-validator';
 
 export class UpdatePendingHoldDto {
     @IsString()
@@ -13,7 +13,11 @@ export class UpdatePendingHoldDto {
     @IsOptional()
     pending?: string;
 
-    @IsBoolean()
+    @IsNumber()
     @IsOptional()
-    isActive?: boolean;
+    isActive?: number;
+
+    @IsNumber()
+    @IsOptional()
+    amount?: number;
 }

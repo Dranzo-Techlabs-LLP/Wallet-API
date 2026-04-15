@@ -2,8 +2,8 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateCol
 
 @Entity('pending_holds')
 export class PendingHold {
-    @PrimaryGeneratedColumn('uuid')
-    id: string;
+    @PrimaryGeneratedColumn()
+    id: number;
 
     @Column({ type: 'varchar' })
     clientId: string;
@@ -11,11 +11,14 @@ export class PendingHold {
     @Column({ type: 'varchar' })
     consultandId: string;
 
-    @Column({ type: 'varchar' })
+    @Column({ type: 'varchar', nullable: true })
     pending: string;
 
-    @Column({ type: 'boolean', default: true })
-    isActive: boolean;
+    @Column({ type: 'tinyint', default: 1, nullable: true })
+    isActive: number;
+
+    @Column({ type: 'decimal', precision: 10, scale: 2, nullable: true })
+    amount: number;
 
     @CreateDateColumn()
     createdAt: Date;
