@@ -16,8 +16,8 @@ export class Session {
     @Column()
     userId: string;
 
-    @Column({ nullable: true })
-    expertId?: string;
+    @Column()
+    expertId: string;
 
     @Column({ type: 'timestamp' })
     startTime: Date;

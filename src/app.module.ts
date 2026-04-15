@@ -6,6 +6,7 @@ import { Expert } from './experts/expert.entity';
 import { BankDetail } from './experts/bank-detail.entity';
 import { Session } from './sessions/session.entity';
 import { Transaction } from './transactions/transaction.entity';
+import { ScheduleModule } from '@nestjs/schedule';
 import { UsersModule } from './users/users.module';
 import { ExpertsModule } from './experts/experts.module';
 import { WalletModule } from './wallet/wallet.module';
@@ -19,6 +20,7 @@ import { PendingHoldsModule } from './pending-holds/pending-holds.module';
         ConfigModule.forRoot({
             isGlobal: true,
         }),
+        ScheduleModule.forRoot(),
         TypeOrmModule.forRootAsync({
             imports: [ConfigModule],
             inject: [ConfigService],

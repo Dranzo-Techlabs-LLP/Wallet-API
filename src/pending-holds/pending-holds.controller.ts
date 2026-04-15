@@ -7,12 +7,12 @@ import { UpdatePendingHoldDto } from './dto/update-pending-hold.dto';
 export class PendingHoldsController {
     constructor(private readonly pendingHoldsService: PendingHoldsService) {}
 
-    @Post()
+    @Post('create')
     create(@Body() createPendingHoldDto: CreatePendingHoldDto) {
         return this.pendingHoldsService.create(createPendingHoldDto);
     }
 
-    @Get()
+    @Get('all')
     findAll() {
         return this.pendingHoldsService.findAll();
     }

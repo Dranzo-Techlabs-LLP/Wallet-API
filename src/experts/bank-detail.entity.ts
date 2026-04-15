@@ -6,8 +6,11 @@ export class BankDetail {
     @PrimaryGeneratedColumn('uuid')
     id: string;
 
-    @Column({ nullable: true })
+    @Column()
     expertId: string;
+
+    @ManyToOne(() => Expert, { onDelete: 'CASCADE' })
+    expert: Expert;
 
     @Column()
     bankName: string;

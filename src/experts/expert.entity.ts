@@ -5,8 +5,8 @@ export class Expert {
     @PrimaryGeneratedColumn('uuid')
     id: string;
 
-    @Column({ nullable: true })
-    expertId?: string; // Internal/External ID reference if needed, or just use UUID
+    @Column({ unique: true })
+    expertId: string; // Internal/External ID reference if needed, or just use UUID
 
     @Column({ type: 'json' })
     bankAccountDetails: Record<string, any>;

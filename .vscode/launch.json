@@ -4,22 +4,36 @@
         {
             "type": "node",
             "request": "launch",
-            "name": "Debug NestJS App",
+            "name": "🚀 Debug Wallet API (localhost:3000)",
+            "runtimeExecutable": "/Users/shinky777/.nvm/versions/node/v20.20.2/bin/node",
+            "runtimeArgs": [
+                "--require",
+                "ts-node/register",
+                "--require",
+                "tsconfig-paths/register"
+            ],
+            "args": [
+                "${workspaceFolder}/src/main.ts"
+            ],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PORT": "3000",
+                "TS_NODE_PROJECT": "${workspaceFolder}/tsconfig.json"
+            },
+            "envFile": "${workspaceFolder}/.env",
             "skipFiles": [
                 "<node_internals>/**"
             ],
-            "program": "${workspaceFolder}/src/main.ts",
-            "preLaunchTask": "tsc: build - tsconfig.json",
+            "sourceMaps": true,
             "outFiles": [
                 "${workspaceFolder}/dist/**/*.js"
             ],
-            "runtimeArgs": [
-                "-r",
-                "ts-node/register",
-                "-r",
-                "tsconfig-paths/register"
+            "resolveSourceMapLocations": [
+                "${workspaceFolder}/**",
+                "!**/node_modules/**"
             ],
-            "envFile": "${workspaceFolder}/.env"
+            "console": "integratedTerminal",
+            "restart": true
         }
     ]
 }

@@ -1,4 +1,4 @@
-import { IsString, IsNotEmpty, IsNumber, Min, IsOptional } from 'class-validator';
+import { IsString, IsNotEmpty, IsNumber, Min } from 'class-validator';
 
 export class EndSessionDto {
     @IsString()
@@ -6,8 +6,8 @@ export class EndSessionDto {
     sessionId: string;
 
     @IsString()
-    @IsOptional()
-    expertId?: string;
+    @IsNotEmpty()
+    expertId: string;
 
     @IsNumber()
     @Min(0)

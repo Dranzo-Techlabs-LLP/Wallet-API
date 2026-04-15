@@ -2,8 +2,8 @@ import { IsString, IsNotEmpty, IsOptional } from 'class-validator';
 
 export class AddBankDetailDto {
     @IsString()
-    @IsOptional()
-    expertId?: string;
+    @IsNotEmpty()
+    expertId: string;
 
     @IsString()
     @IsNotEmpty()
