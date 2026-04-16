@@ -1,11 +1,25 @@
-import { Controller, Get, Post, Body, Patch, Param, Delete } from '@nestjs/common';
+import { Controller, Get, Post, Body, Patch, Param, Delete, Query } from '@nestjs/common';
 import { PendingHoldsService } from './pending-holds.service';
 import { CreatePendingHoldDto } from './dto/create-pending-hold.dto';
 import { UpdatePendingHoldDto } from './dto/update-pending-hold.dto';
+import { InitiateHoldDto } from './dto/initiate-hold.dto';
 
 @Controller('v1/pending-holds')
 export class PendingHoldsController {
     constructor(private readonly pendingHoldsService: PendingHoldsService) {}
+
+    @Get('exists')
+    checkExists(
+        @Query('clientId') clientId: string,
+        @Query('consultantId') consultantId: string
+    ) {
+        return this.pendingHoldsService.exists(clientId, consultantId);
+    }
+
+    @Post('initiate')
+    initiate(@Body() initiateHoldDto: InitiateHoldDto) {
+        return this.pendingHoldsService.initiateHold(initiateHoldDto);
+    }
 
     @Post('create')
     create(@Body() createPendingHoldDto: CreatePendingHoldDto) {

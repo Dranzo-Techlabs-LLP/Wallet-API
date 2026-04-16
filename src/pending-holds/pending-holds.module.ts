@@ -3,9 +3,10 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { PendingHoldsService } from './pending-holds.service';
 import { PendingHoldsController } from './pending-holds.controller';
 import { PendingHold } from './pending-hold.entity';
+import { User } from '../users/user.entity';
 
 @Module({
-    imports: [TypeOrmModule.forFeature([PendingHold])],
+    imports: [TypeOrmModule.forFeature([PendingHold, User])],
     controllers: [PendingHoldsController],
     providers: [PendingHoldsService],
     exports: [PendingHoldsService],
