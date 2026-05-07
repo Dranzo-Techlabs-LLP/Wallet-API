@@ -130,4 +130,24 @@ export class PendingHoldsService {
         });
         return { exists: count > 0 };
     }
+
+    async status(clientId: string, consultantId: string): Promise<{ exists: boolean, pendingHoldId: number | null, refund_status: string }> {
+        const hold = await this.pendingHoldRepository.findOne({
+            where: {
+                clientId,
+                consultandId: consultantId,
+                isRefundActive: 1
+            }
+        });
+
+        if (!hold) {
+            return { exists: false, pendingHoldId: null, refund_status: 'none' };
+        }
+
+        return { 
+            exists: true, 
+            pendingHoldId: hold.id, 
+            refund_status: hold.refund_status 
+        };
+    }
 }

@@ -16,6 +16,14 @@ export class PendingHoldsController {
         return this.pendingHoldsService.exists(clientId, consultantId);
     }
 
+    @Get('status')
+    async getStatus(
+        @Query('clientId') clientId: string,
+        @Query('consultantId') consultantId: string
+    ) {
+        return this.pendingHoldsService.status(clientId, consultantId);
+    }
+
     @Post('initiate')
     initiate(@Body() initiateHoldDto: InitiateHoldDto) {
         return this.pendingHoldsService.initiateHold(initiateHoldDto);

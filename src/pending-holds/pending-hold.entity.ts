@@ -20,6 +20,12 @@ export class PendingHold {
     @Column({ type: 'decimal', precision: 10, scale: 2, nullable: true })
     amount: number;
 
+    @Column({ type: 'enum', enum: ['none', 'requested', 'approved', 'rejected'], default: 'none' })
+    refund_status: string;
+
+    @Column({ type: 'tinyint', default: 1, nullable: true })
+    isRefundActive: number;
+
     @CreateDateColumn()
     createdAt: Date;
 
