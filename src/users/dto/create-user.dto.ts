@@ -1,4 +1,4 @@
-import { IsString, IsOptional, IsNumber, IsObject } from 'class-validator';
+import { IsString, IsOptional, IsNumber, IsObject, IsInt, IsIn } from 'class-validator';
 
 export class CreateUserDto {
     @IsOptional()
@@ -21,4 +21,9 @@ export class CreateUserDto {
     @IsObject()
     @IsOptional()
     settings?: Record<string, any>;
+
+    // 0 = normal user (client), 1 = consultant. Required at signup.
+    @IsInt()
+    @IsIn([0, 1])
+    isConsultant: number;
 }

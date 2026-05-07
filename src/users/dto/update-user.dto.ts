@@ -1,4 +1,4 @@
-import { IsOptional, IsString, IsNumber, IsObject } from 'class-validator';
+import { IsOptional, IsString, IsNumber, IsObject, IsInt, IsIn } from 'class-validator';
 
 export class UpdateUserDto {
     @IsOptional()
@@ -21,4 +21,9 @@ export class UpdateUserDto {
     @IsOptional()
     @IsObject()
     settings?: Record<string, any>;
+
+    @IsOptional()
+    @IsInt()
+    @IsIn([0, 1])
+    isConsultant?: number;
 }

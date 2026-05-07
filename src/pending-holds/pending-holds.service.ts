@@ -1,4 +1,4 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, ForbiddenException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, Connection, MoreThan } from 'typeorm';
 import { PendingHold } from './pending-hold.entity';
@@ -44,6 +44,11 @@ export class PendingHoldsService {
 
             if (!client) {
                 throw new NotFoundException(`Client ${dto.clientId} not found`);
+            }
+
+            // Block: consultants cannot initiate holds (only clients pay consultants)
+            if (Number(client.isConsultant) === 1) {
+                throw new ForbiddenException(`Consultants cannot initiate a chat hold`);
             }
 
             // 3. Check for existing hold within 24 hours

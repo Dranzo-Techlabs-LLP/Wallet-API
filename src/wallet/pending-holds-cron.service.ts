@@ -5,6 +5,18 @@ import { Repository, Connection, LessThan } from 'typeorm';
 import { PendingHold } from '../pending-holds/pending-hold.entity';
 import { User } from '../users/user.entity';
 
+/**
+ * Pending-hold settlement cron.
+ *
+ * Spec:
+ *  - Funds are deducted from client.current_hold at hold creation and parked in pending_holds.
+ *  - 24h after creation the cron settles the hold based on refund_status:
+ *      • 'none'       → consultant receives the funds (default flow).
+ *      • 'rejected'   → consultant receives the funds (consultant denied the refund).
+ *      • 'requested'  → "unattended" by consultant → client gets refund.
+ *      • 'approved'   → already settled by RefundsService.approveRefund (immediate). Cron just cleans up.
+ *  - The pending_holds row is deleted after settlement.
+ */
 @Injectable()
 export class PendingHoldsCronService {
     private readonly logger = new Logger(PendingHoldsCronService.name);
@@ -19,7 +31,6 @@ export class PendingHoldsCronService {
     async handleCron() {
         this.logger.debug('Running pending holds cron job...');
 
-        // 24 hours ago
         const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
         try {
@@ -33,52 +44,66 @@ export class PendingHoldsCronService {
                 return;
             }
 
-            this.logger.log(`Found ${recordsToProcess.length} pending holds to process.`);
+            this.logger.log(`Found ${recordsToProcess.length} pending holds to settle.`);
 
             for (const record of recordsToProcess) {
-                const queryRunner = this.connection.createQueryRunner();
-                await queryRunner.connect();
-                await queryRunner.startTransaction();
-
-                try {
-                    // Determine which user to find based on isActive
-                    const targetWebuddyName = record.isActive === 1 ? record.consultandId : record.clientId;
-
-                    if (!targetWebuddyName) {
-                        this.logger.warn(`Record ${record.id} has empty targetWebuddyName. Skipping and deleting.`);
-                        await queryRunner.manager.delete(PendingHold, record.id);
-                        await queryRunner.commitTransaction();
-                        continue;
-                    }
-
-                    const user = await queryRunner.manager.findOne(User, {
-                        where: { Webuddy_name: targetWebuddyName },
-                        lock: { mode: 'pessimistic_write' }, // Optional: row lock
-                    });
-
-                    if (user) {
-                        // Add amount to current_hold
-                        user.current_hold = Number(user.current_hold) + Number(record.amount);
-                        await queryRunner.manager.save(User, user);
-                        this.logger.log(`Updated user ${user.Webuddy_name} current_hold by ${record.amount}.`);
-                    } else {
-                        this.logger.warn(`User with Webuddy_name ${targetWebuddyName} not found for pending hold ${record.id}.`);
-                    }
-
-                    // Delete the row from pending_holds regardless of whether user was found or not
-                    // This prevents infinite retries for a malformed record
-                    await queryRunner.manager.delete(PendingHold, record.id);
-
-                    await queryRunner.commitTransaction();
-                } catch (err) {
-                    this.logger.error(`Error processing pending hold ${record.id}: ${err.message}`, err.stack);
-                    await queryRunner.rollbackTransaction();
-                } finally {
-                    await queryRunner.release();
-                }
+                await this.settle(record);
             }
         } catch (error) {
-            this.logger.error('Error fetching pending holds:', error.stack);
+            this.logger.error('Error fetching pending holds:', error?.stack);
+        }
+    }
+
+    private async settle(record: PendingHold) {
+        const queryRunner = this.connection.createQueryRunner();
+        await queryRunner.connect();
+        await queryRunner.startTransaction();
+
+        try {
+            // Decide the settlement target based on refund_status.
+            // 'requested' → unattended → refund client. 'approved' → already done. Else → consultant.
+            const status = record.refund_status ?? 'none';
+            let targetWebuddyName: string | null;
+            let action: 'refund-client' | 'pay-consultant' | 'cleanup' = 'pay-consultant';
+
+            if (status === 'requested') {
+                targetWebuddyName = record.clientId;
+                action = 'refund-client';
+            } else if (status === 'approved') {
+                // RefundsService.approveRefund already credited the client. Skip settlement, just delete row.
+                targetWebuddyName = null;
+                action = 'cleanup';
+            } else {
+                // 'none' or 'rejected'
+                targetWebuddyName = (record as any).consultandId ?? (record as any).consultantId;
+                action = 'pay-consultant';
+            }
+
+            if (action !== 'cleanup' && targetWebuddyName) {
+                const user = await queryRunner.manager.findOne(User, {
+                    where: { Webuddy_name: targetWebuddyName },
+                    lock: { mode: 'pessimistic_write' },
+                });
+                if (user) {
+                    user.current_hold = Number(user.current_hold) + Number(record.amount);
+                    await queryRunner.manager.save(User, user);
+                    this.logger.log(
+                        `Hold ${record.id} settled (${action}). Credited ${record.amount} to ${user.Webuddy_name}. refund_status=${status}.`
+                    );
+                } else {
+                    this.logger.warn(`User ${targetWebuddyName} not found for hold ${record.id}; deleting row.`);
+                }
+            } else {
+                this.logger.log(`Hold ${record.id} cleanup (status=${status}); already settled.`);
+            }
+
+            await queryRunner.manager.delete(PendingHold, record.id);
+            await queryRunner.commitTransaction();
+        } catch (err) {
+            this.logger.error(`Error settling pending hold ${record.id}: ${err.message}`, err.stack);
+            await queryRunner.rollbackTransaction();
+        } finally {
+            await queryRunner.release();
         }
     }
 }

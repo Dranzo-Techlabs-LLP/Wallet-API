@@ -24,6 +24,9 @@ export class User {
     @Column({ nullable: true, unique: true })
     Webuddy_name?: string;
 
+    @Column({ type: 'tinyint', width: 1, default: 0 })
+    isConsultant: number;
+
     @CreateDateColumn()
     createdAt: Date;
 
