@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, Connection, MoreThan } from 'typeorm';
 import { PendingHold } from './pending-hold.entity';
 import { User } from '../users/user.entity';
+import { RefundRequest } from '../refunds/refund-request.entity';
 import { CreatePendingHoldDto } from './dto/create-pending-hold.dto';
 import { UpdatePendingHoldDto } from './dto/update-pending-hold.dto';
 import { InitiateHoldDto } from './dto/initiate-hold.dto';
@@ -16,6 +17,8 @@ export class PendingHoldsService {
         private readonly pendingHoldRepository: Repository<PendingHold>,
         @InjectRepository(User)
         private readonly userRepository: Repository<User>,
+        @InjectRepository(RefundRequest)
+        private readonly refundRequestRepository: Repository<RefundRequest>,
         private readonly connection: Connection,
     ) {}
 
@@ -136,23 +139,52 @@ export class PendingHoldsService {
         return { exists: count > 0 };
     }
 
-    async status(clientId: string, consultantId: string): Promise<{ exists: boolean, pendingHoldId: number | null, refund_status: string }> {
+    // Bidirectional lookup: returns the active hold between two users regardless of who is the
+    // client and who is the consultant on record. Caller can compare its own user id against the
+    // returned clientId/consultantId fields to determine its role.
+    async status(userA: string, userB: string): Promise<{
+        exists: boolean,
+        pendingHoldId: number | null,
+        refund_status: string,
+        clientId: string | null,
+        consultantId: string | null,
+        refundRequestId: number | null,
+    }> {
         const hold = await this.pendingHoldRepository.findOne({
-            where: {
-                clientId,
-                consultandId: consultantId,
-                isRefundActive: 1
-            }
+            where: [
+                { clientId: userA, consultandId: userB, isRefundActive: 1 },
+                { clientId: userB, consultandId: userA, isRefundActive: 1 },
+            ],
+            order: { createdAt: 'DESC' },
         });
 
         if (!hold) {
-            return { exists: false, pendingHoldId: null, refund_status: 'none' };
+            return {
+                exists: false,
+                pendingHoldId: null,
+                refund_status: 'none',
+                clientId: null,
+                consultantId: null,
+                refundRequestId: null,
+            };
         }
 
-        return { 
-            exists: true, 
-            pendingHoldId: hold.id, 
-            refund_status: hold.refund_status 
+        let refundRequestId: number | null = null;
+        if (hold.refund_status === 'requested') {
+            const req = await this.refundRequestRepository.findOne({
+                where: { pendingHoldId: hold.id, status: 'requested' },
+                order: { createdAt: 'DESC' },
+            });
+            refundRequestId = req?.id ?? null;
+        }
+
+        return {
+            exists: true,
+            pendingHoldId: hold.id,
+            refund_status: hold.refund_status,
+            clientId: hold.clientId,
+            consultantId: hold.consultandId,
+            refundRequestId,
         };
     }
 }
