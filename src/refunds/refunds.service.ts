@@ -107,6 +107,12 @@ export class RefundsService {
             client.current_hold = Number(client.current_hold) + Number(hold.amount);
             await queryRunner.manager.save(User, client);
 
+            // Ledger: client CREDIT entry for the refund.
+            await queryRunner.manager.query(
+                `INSERT INTO wallet_transactions (user_id, amount, currency, txn_type, source, status, provider) VALUES (?, ?, 'INR', 'CREDIT', 'REFUND', 'PAID', 'SYSTEM')`,
+                [client.id, Number(hold.amount)]
+            );
+
             refundRequest.status = 'approved';
             await queryRunner.manager.save(RefundRequest, refundRequest);
 

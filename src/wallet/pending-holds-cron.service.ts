@@ -87,6 +87,13 @@ export class PendingHoldsCronService {
                 if (user) {
                     user.current_hold = Number(user.current_hold) + Number(record.amount);
                     await queryRunner.manager.save(User, user);
+                    // Ledger: CREDIT entry for the settlement. 'refund-client' = unattended refund returning funds to the client;
+                    // 'pay-consultant' = default 24h settlement (or post-rejection) crediting the consultant.
+                    const source = action === 'refund-client' ? 'REFUND' : 'HOLD_SETTLED';
+                    await queryRunner.manager.query(
+                        `INSERT INTO wallet_transactions (user_id, amount, currency, txn_type, source, status, provider) VALUES (?, ?, 'INR', 'CREDIT', ?, 'PAID', 'SYSTEM')`,
+                        [user.id, Number(record.amount), source]
+                    );
                     this.logger.log(
                         `Hold ${record.id} settled (${action}). Credited ${record.amount} to ${user.Webuddy_name}. refund_status=${status}.`
                     );

@@ -87,6 +87,13 @@ export class PendingHoldsService {
                     pending: 'INITIATED'
                 });
                 savedHold = await queryRunner.manager.save(PendingHold, pendingHold);
+
+                // Ledger: client DEBIT for the new hold so it shows up in their wallet history.
+                await queryRunner.manager.query(
+                    `INSERT INTO wallet_transactions (user_id, amount, currency, txn_type, source, status, provider) VALUES (?, ?, 'INR', 'DEBIT', 'HOLD', 'PAID', 'SYSTEM')`,
+                    [client.id, holdAmount]
+                );
+
                 this.logger.log(`Created new hold (isActive=0): ${holdAmount} from ${dto.clientId} to ${dto.consultantId}. Balance deducted.`);
             }
 
