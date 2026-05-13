@@ -1,6 +1,6 @@
 import { Injectable, Logger, NotFoundException, ForbiddenException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, Connection, MoreThan } from 'typeorm';
+import { Repository, Connection, MoreThan, Not } from 'typeorm';
 import { PendingHold } from './pending-hold.entity';
 import { User } from '../users/user.entity';
 import { RefundRequest } from '../refunds/refund-request.entity';
@@ -54,13 +54,18 @@ export class PendingHoldsService {
                 throw new ForbiddenException(`Consultants cannot initiate a chat hold`);
             }
 
-            // 3. Check for existing hold within 24 hours
+            // 3. Check for an existing LIVE hold within 24 hours.
+            // 'approved' rows are deleted in RefundsService.approveRefund, so we shouldn't see them
+            // here — but exclude them defensively in case a stale row survives from before that fix.
+            // We DO reuse 'rejected' rows: the consultant denied the refund and the cron will pay
+            // them at the 24h mark; the user owes for that prior chat, so a new chat shares it.
             const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
             const existingHold = await queryRunner.manager.findOne(PendingHold, {
                 where: {
                     clientId: dto.clientId,
                     consultandId: dto.consultantId,
-                    createdAt: MoreThan(twentyFourHoursAgo)
+                    createdAt: MoreThan(twentyFourHoursAgo),
+                    refund_status: Not('approved'),
                 },
                 order: { createdAt: 'DESC' }
             });

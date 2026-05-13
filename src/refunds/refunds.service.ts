@@ -83,6 +83,12 @@ export class RefundsService {
                 throw new NotFoundException('Refund request not found');
             }
 
+            // Idempotency: refundRequest is the durable audit record. The pending_hold row is
+            // deleted on approval, so we can't rely on it for the double-approve guard anymore.
+            if (refundRequest.status === 'approved') {
+                throw new BadRequestException('Already approved');
+            }
+
             const hold = await queryRunner.manager.findOne(PendingHold, {
                 where: { id: pendingHoldId },
                 lock: { mode: 'pessimistic_write' },
@@ -90,10 +96,6 @@ export class RefundsService {
 
             if (!hold) {
                 throw new NotFoundException('Pending hold not found');
-            }
-
-            if (hold.refund_status === 'approved') {
-                throw new BadRequestException('Already approved');
             }
 
             // Refund: add hold.amount back to client.current_hold
@@ -116,11 +118,11 @@ export class RefundsService {
             refundRequest.status = 'approved';
             await queryRunner.manager.save(RefundRequest, refundRequest);
 
-            // Mark hold consumed so cron skips it.
-            hold.refund_status = 'approved';
-            hold.isRefundActive = 0;
-            hold.isActive = 0;
-            await queryRunner.manager.save(PendingHold, hold);
+            // Hold is fully consumed: client got their funds back. Delete the row so a future chat
+            // with the same consultant correctly creates a fresh hold (and debits credits) instead of
+            // reusing this dead row in PendingHoldsService.initiateHold. The refund_request row
+            // preserves the audit trail.
+            await queryRunner.manager.delete(PendingHold, hold.id);
 
             await queryRunner.commitTransaction();
 
