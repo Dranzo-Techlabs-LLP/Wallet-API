@@ -136,6 +136,35 @@ export class RefundsService {
         }
     }
 
+    /**
+     * Returns the set of client Matrix IDs that currently have an open refund request
+     * (refund_status='requested', isRefundActive=1) directed at this consultant.
+     * Used by the Android chat list to mark rows needing the consultant's attention.
+     */
+    async pendingForConsultant(consultantId: string): Promise<{ clientIds: string[] }> {
+        if (!consultantId) {
+            return { clientIds: [] };
+        }
+        const rows = await this.pendingHoldRepository.find({
+            where: {
+                consultandId: consultantId,
+                refund_status: 'requested',
+                isRefundActive: 1,
+            },
+        });
+        // Dedupe — a client could (in edge cases) have multiple open requests with the
+        // same consultant on different holds; the chat list only needs the id once.
+        const seen: { [k: string]: true } = {};
+        const clientIds: string[] = [];
+        for (const r of rows) {
+            if (!seen[r.clientId]) {
+                seen[r.clientId] = true;
+                clientIds.push(r.clientId);
+            }
+        }
+        return { clientIds };
+    }
+
     // Consultant rejects refund. Status flipped; cron will transfer to consultant after 24h hold age.
     async rejectRefund(refundRequestId: number) {
         const queryRunner = this.connection.createQueryRunner();

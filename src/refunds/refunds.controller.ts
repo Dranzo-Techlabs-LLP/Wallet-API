@@ -1,4 +1,4 @@
-import { Controller, Post, Body } from '@nestjs/common';
+import { Controller, Post, Get, Body, Query } from '@nestjs/common';
 import { RefundsService } from './refunds.service';
 
 @Controller('v1/refund')
@@ -18,5 +18,15 @@ export class RefundsController {
     @Post('reject')
     rejectRefund(@Body() body: { refundRequestId: string }) {
         return this.refundsService.rejectRefund(parseInt(body.refundRequestId, 10));
+    }
+
+    /**
+     * Bulk lookup of which clients have a pending (status='requested', isRefundActive=1)
+     * refund request awaiting this consultant's decision. Used by the Android chat list
+     * to render a per-row indicator without N round-trips.
+     */
+    @Get('pending-for-consultant')
+    pendingForConsultant(@Query('consultantId') consultantId: string) {
+        return this.refundsService.pendingForConsultant(consultantId);
     }
 }
