@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, ForbiddenException, Logger } from '@nestjs/common';
 import { InjectRepository, InjectConnection } from '@nestjs/typeorm';
 import { Repository, Connection, EntityManager } from 'typeorm';
 import { User } from '../users/user.entity';
@@ -24,6 +24,24 @@ export class WalletService {
             key_id: this.configService.get<string>('RAZORPAY_KEY_ID'),
             key_secret: this.configService.get<string>('RAZORPAY_KEY_SECRET'),
         });
+    }
+
+    /**
+     * Constant-time hex string comparison. Both inputs must be hex; if they differ
+     * in length we still consume both via timingSafeEqual against a fixed buffer
+     * so the comparison time does not leak the length.
+     */
+    private timingSafeEqualHex(a: string, b: string): boolean {
+        try {
+            if (typeof a !== 'string' || typeof b !== 'string') return false;
+            if (a.length !== b.length) return false;
+            const ab = Buffer.from(a, 'hex');
+            const bb = Buffer.from(b, 'hex');
+            if (ab.length !== bb.length) return false;
+            return crypto.timingSafeEqual(ab, bb);
+        } catch {
+            return false;
+        }
     }
 
     private async resolveUserIdentifier(identifier: string): Promise<User> {
@@ -124,30 +142,21 @@ export class WalletService {
         this.logger.debug(`Received Sig: ${razorpay_signature}`);
         this.logger.debug(`Is secret loaded? ${!!secret}`);
 
-        if (generated_signature !== razorpay_signature) {
+        // Constant-time comparison to avoid timing leaks against the server-side HMAC.
+        const sigMatches = this.timingSafeEqualHex(generated_signature, razorpay_signature);
+        if (!sigMatches) {
             await this.connection.query(
                 `UPDATE wallet_transactions SET status = 'FAILED' WHERE id = ?`,
                 [transactionId]
             );
 
-            // Write to physical file 'error_log.txt' for debugging on cPanel
-            try {
-                const fs = require('fs');
-                const path = require('path');
-                const logFilePath = path.join(process.cwd(), 'error_log.txt');
-                const logEntry = `[${new Date().toISOString()}] PAYMENT VERIFICATION FAILED\n` +
-                    `Order ID: ${razorpay_order_id}\n` +
-                    `Payment ID: ${razorpay_payment_id}\n` +
-                    `Generated Sig: ${generated_signature}\n` +
-                    `Received Sig:  ${razorpay_signature}\n` +
-                    `Is Secret Loaded: ${!!secret}\n` +
-                    `User Identifier: ${identifier}\n\n`;
-                fs.appendFileSync(logFilePath, logEntry);
-            } catch (fsErr) {
-                this.logger.error('Could not write to error_log.txt', fsErr);
-            }
+            // Log mismatch server-side only — never echo the generated HMAC to the client.
+            this.logger.warn(
+                `Payment signature mismatch (txnId=${transactionId}, order=${razorpay_order_id}, payment=${razorpay_payment_id}, user=${identifier})`
+            );
 
-            throw new BadRequestException(`Invalid payment signature. Generated: ${generated_signature}, Received: ${razorpay_signature}`);
+            // Generic message: do NOT leak generated/received signature values to clients.
+            throw new BadRequestException('Invalid payment signature');
         }
 
         // 3. Update Status and Credit Wallet Atomically
@@ -187,16 +196,35 @@ export class WalletService {
         });
     }
 
-    async handleWebhook(signature: string, rawBody: any) {
+    async handleWebhook(signature: string, rawBody: string, parsedBody: any) {
         const webhookSecret = this.configService.get<string>('RAZORPAY_WEBHOOK_SECRET');
+        if (!webhookSecret) {
+            this.logger.error('RAZORPAY_WEBHOOK_SECRET is not configured — refusing webhook');
+            throw new ForbiddenException('Webhook is not configured');
+        }
+        if (!signature) {
+            this.logger.warn('Webhook called without x-razorpay-signature header');
+            throw new ForbiddenException('Missing signature');
+        }
+        if (!rawBody) {
+            this.logger.warn('Webhook called without raw body — rawBody must be enabled on the Nest app');
+            throw new ForbiddenException('Empty body');
+        }
 
+        // HMAC must be computed over the EXACT bytes Razorpay sent, not over the
+        // JSON-parsed-and-re-serialized payload (whitespace / key-order differ).
         const expectedSignature = crypto
             .createHmac('sha256', webhookSecret)
-            .update(JSON.stringify(rawBody))
+            .update(rawBody)
             .digest('hex');
 
-        const event = rawBody.event;
-        const payload = rawBody.payload;
+        if (!this.timingSafeEqualHex(expectedSignature, signature)) {
+            this.logger.warn('Webhook signature mismatch — request rejected');
+            throw new ForbiddenException('Invalid webhook signature');
+        }
+
+        const event = parsedBody.event;
+        const payload = parsedBody.payload;
 
         if (event === 'payment.captured') {
             const payment = payload.payment.entity;
@@ -279,17 +307,22 @@ export class WalletService {
         const user = await this.resolveUserIdentifier(identifier);
         const offset = (page - 1) * pageSize;
 
+        // Hide stale CREATED recharge orders (>1h old) — they are abandoned
+        // Razorpay sessions where the user never completed payment. Showing them
+        // confuses users into thinking they have pending payments.
+        const STALE_FILTER = `AND NOT (status = 'CREATED' AND created_at < DATE_SUB(NOW(), INTERVAL 1 HOUR))`;
+
         const rows = await this.connection.query(
             `SELECT CAST(id AS CHAR) as id, user_id as userId, amount, currency, txn_type as type, source, status, provider, provider_order_id as providerOrderId, provider_payment_id as providerPaymentId, created_at as createdAt
              FROM wallet_transactions
-             WHERE user_id = ?
+             WHERE user_id = ? ${STALE_FILTER}
              ORDER BY created_at DESC
              LIMIT ? OFFSET ?`,
             [user.id, pageSize, offset]
         );
 
         const [{ total }] = await this.connection.query(
-            `SELECT COUNT(*) as total FROM wallet_transactions WHERE user_id = ?`,
+            `SELECT COUNT(*) as total FROM wallet_transactions WHERE user_id = ? ${STALE_FILTER}`,
             [user.id]
         );
 

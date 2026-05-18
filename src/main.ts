@@ -6,7 +6,10 @@ import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 
 async function bootstrap() {
     try {
-        const app = await NestFactory.create(AppModule);
+        // rawBody: true preserves the exact request bytes on req.rawBody so
+        // we can validate the Razorpay webhook HMAC against the original payload.
+        // (JSON.stringify(req.body) re-serializes and will not match Razorpay's signature.)
+        const app = await NestFactory.create(AppModule, { rawBody: true });
         app.useGlobalFilters(new AllExceptionsFilter());
         app.useGlobalPipes(new ValidationPipe({
             whitelist: true,

@@ -1,4 +1,4 @@
-import { Injectable, Logger, NotFoundException, ForbiddenException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, ForbiddenException, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, Connection, MoreThan, Not } from 'typeorm';
 import { PendingHold } from './pending-hold.entity';
@@ -79,8 +79,17 @@ export class PendingHoldsService {
                 savedHold = await queryRunner.manager.save(PendingHold, existingHold);
                 this.logger.log(`Updated existing hold (isActive=1): ${holdAmount} from ${dto.clientId} to ${dto.consultantId}. No balance deduction.`);
             } else {
+                // Insufficient-balance guard: a client cannot start a chat hold they cannot afford.
+                // Without this, current_hold could go negative — observed in testing.
+                const currentBalance = Number(client.current_hold) || 0;
+                if (currentBalance < holdAmount) {
+                    throw new BadRequestException(
+                        `Insufficient credits: need ${holdAmount}, have ${currentBalance}. Please recharge to start this chat.`
+                    );
+                }
+
                 // SUBTRACT ONLY ON INSERT
-                client.current_hold = Number(client.current_hold) - holdAmount;
+                client.current_hold = currentBalance - holdAmount;
                 await queryRunner.manager.save(User, client);
 
                 // Insert new: set isActive to 0
@@ -142,11 +151,15 @@ export class PendingHoldsService {
     }
 
     async exists(clientId: string, consultantId: string): Promise<{ exists: boolean }> {
+        // Only treat a hold as "existing" if it is currently active OR has an open refund.
+        // Counting every historical hold caused stale 'true' responses for chats whose
+        // hold was already refunded/closed, which made the Android client skip the
+        // initiateHold call and rely on a phantom hold.
         const count = await this.pendingHoldRepository.count({
-            where: {
-                clientId,
-                consultandId: consultantId
-            }
+            where: [
+                { clientId, consultandId: consultantId, isActive: 1 },
+                { clientId, consultandId: consultantId, isRefundActive: 1 },
+            ]
         });
         return { exists: count > 0 };
     }

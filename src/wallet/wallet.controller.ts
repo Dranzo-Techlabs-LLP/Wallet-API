@@ -1,4 +1,5 @@
-import { Controller, Post, Get, Body, Query, Headers } from '@nestjs/common';
+import { Controller, Post, Get, Body, Query, Headers, Req, RawBodyRequest } from '@nestjs/common';
+import { Request } from 'express';
 import { WalletService } from './wallet.service';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { VerifyPaymentDto } from './dto/verify-payment.dto';
@@ -36,13 +37,18 @@ export class WalletController {
     /**
      * Razorpay webhook endpoint (called by Razorpay servers, not Android).
      * POST /v1/wallet/webhook
+     *
+     * Uses the RAW request bytes for HMAC verification, since JSON re-serialization
+     * (key ordering, whitespace, escaping) will not match Razorpay's signature.
      */
     @Post('webhook')
     handleWebhook(
         @Headers('x-razorpay-signature') signature: string,
+        @Req() req: RawBodyRequest<Request>,
         @Body() body: any,
     ) {
-        return this.walletService.handleWebhook(signature, body);
+        const rawBody = req.rawBody ? req.rawBody.toString('utf8') : '';
+        return this.walletService.handleWebhook(signature, rawBody, body);
     }
 
     /**
