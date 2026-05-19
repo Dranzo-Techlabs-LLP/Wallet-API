@@ -4,6 +4,7 @@ import { Repository, Connection, MoreThan, Not } from 'typeorm';
 import { PendingHold } from './pending-hold.entity';
 import { User } from '../users/user.entity';
 import { RefundRequest } from '../refunds/refund-request.entity';
+import { RefundsService } from '../refunds/refunds.service';
 import { CreatePendingHoldDto } from './dto/create-pending-hold.dto';
 import { UpdatePendingHoldDto } from './dto/update-pending-hold.dto';
 import { InitiateHoldDto } from './dto/initiate-hold.dto';
@@ -20,6 +21,7 @@ export class PendingHoldsService {
         @InjectRepository(RefundRequest)
         private readonly refundRequestRepository: Repository<RefundRequest>,
         private readonly connection: Connection,
+        private readonly refundsService: RefundsService,
     ) {}
 
     async initiateHold(dto: InitiateHoldDto): Promise<PendingHold> {
@@ -167,6 +169,10 @@ export class PendingHoldsService {
     // Bidirectional lookup: returns the active hold between two users regardless of who is the
     // client and who is the consultant on record. Caller can compare its own user id against the
     // returned clientId/consultantId fields to determine its role.
+    //
+    // ALSO returns any pending auto-approval notification for this user pair (regardless of
+    // whether a live hold exists, since the hold is deleted at auto-approval time). Surfacing
+    // it here lets the Android client's existing 15s poll discover it without a second request.
     async status(userA: string, userB: string): Promise<{
         exists: boolean,
         pendingHoldId: number | null,
@@ -174,6 +180,12 @@ export class PendingHoldsService {
         clientId: string | null,
         consultantId: string | null,
         refundRequestId: number | null,
+        pendingAutoApprovalNotification: {
+            refundRequestId: number;
+            amount: number;
+            clientId: string;
+            consultantId: string;
+        } | null,
     }> {
         const hold = await this.pendingHoldRepository.findOne({
             where: [
@@ -183,6 +195,9 @@ export class PendingHoldsService {
             order: { createdAt: 'DESC' },
         });
 
+        const pendingAutoApprovalNotification = await this.refundsService
+            .findPendingAutoApprovalForPair(userA, userB);
+
         if (!hold) {
             return {
                 exists: false,
@@ -191,6 +206,7 @@ export class PendingHoldsService {
                 clientId: null,
                 consultantId: null,
                 refundRequestId: null,
+                pendingAutoApprovalNotification,
             };
         }
 
@@ -210,6 +226,7 @@ export class PendingHoldsService {
             clientId: hold.clientId,
             consultantId: hold.consultandId,
             refundRequestId,
+            pendingAutoApprovalNotification,
         };
     }
 }

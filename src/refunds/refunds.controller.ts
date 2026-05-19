@@ -1,4 +1,4 @@
-import { Controller, Post, Get, Body, Query } from '@nestjs/common';
+import { Controller, Post, Get, Body, Query, Param, BadRequestException } from '@nestjs/common';
 import { RefundsService } from './refunds.service';
 
 @Controller('v1/refund')
@@ -12,6 +12,7 @@ export class RefundsController {
 
     @Post('approve')
     approveRefund(@Body() body: { refundRequestId: string; pendingHoldId: string }) {
+        // isAutomatic defaults to false on the public endpoint — only the cron passes true.
         return this.refundsService.approveRefund(parseInt(body.refundRequestId, 10), parseInt(body.pendingHoldId, 10));
     }
 
@@ -28,5 +29,20 @@ export class RefundsController {
     @Get('pending-for-consultant')
     pendingForConsultant(@Query('consultantId') consultantId: string) {
         return this.refundsService.pendingForConsultant(consultantId);
+    }
+
+    /**
+     * Atomic claim for an auto-approved refund's in-room push notification. The first
+     * Android client to call wins the right to send the Matrix m.room.message in the DM
+     * (which triggers the other party's homeserver → Sygnal → FCM push); subsequent
+     * callers get `claimed:false` and skip the send to avoid duplicate room messages.
+     */
+    @Post('auto-approval-claim/:id')
+    claimAutoApproval(@Param('id') id: string, @Body() body: { userId: string }) {
+        const refundRequestId = parseInt(id, 10);
+        if (!Number.isFinite(refundRequestId) || refundRequestId <= 0) {
+            throw new BadRequestException('Invalid refund request id');
+        }
+        return this.refundsService.claimAutoApprovalNotification(refundRequestId, body?.userId);
     }
 }

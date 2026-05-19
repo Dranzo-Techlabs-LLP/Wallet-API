@@ -179,12 +179,14 @@ export class PendingHoldsCronService {
         }
 
         // 24h elapsed without consultant action → auto-approve.
+        // Pass isAutomatic=true so RefundsService leaves notification_sent=0 — the apps
+        // will claim and announce on their next poll via POST /v1/refund/auto-approval-claim.
         try {
-            await this.refundsService.approveRefund(refundRequest.id, record.id);
+            await this.refundsService.approveRefund(refundRequest.id, record.id, /* isAutomatic */ true);
             this.logger.log(
                 `Auto-approved refund ${refundRequest.id} for hold ${record.id} ` +
                 `(unattended ${Math.floor(ageMs / 3600000)}h after request). ` +
-                `Credits returned to client ${record.clientId}.`
+                `Credits returned to client ${record.clientId}. Pending Matrix notification claim.`
             );
         } catch (err) {
             // approveRefund throws on idempotency violation ('Already approved'), missing hold,
