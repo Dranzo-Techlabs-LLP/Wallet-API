@@ -30,8 +30,21 @@ import { User } from '../users/user.entity';
 export class PendingHoldsCronService {
     private readonly logger = new Logger(PendingHoldsCronService.name);
 
-    /** Consultant has this long to act on a refund request before it is auto-approved. */
-    private static readonly REFUND_RESPONSE_WINDOW_MS = 24 * 60 * 60 * 1000;
+    /**
+     * Consultant has this long to act on a refund request before it is auto-approved.
+     * Env-overridable for testing; defaults to 24h in production. Set
+     * REFUND_RESPONSE_WINDOW_MS=60000 (1 min) to exercise the auto-approval flow quickly.
+     */
+    private static readonly REFUND_RESPONSE_WINDOW_MS =
+        Number(process.env.REFUND_RESPONSE_WINDOW_MS) || 24 * 60 * 60 * 1000;
+
+    /**
+     * A hold must be at least this old before the cron will even look at it.
+     * Env-overridable for testing; defaults to 24h in production. Set
+     * HOLD_SETTLE_WINDOW_MS=60000 (1 min) so a freshly-created hold becomes eligible quickly.
+     */
+    private static readonly HOLD_SETTLE_WINDOW_MS =
+        Number(process.env.HOLD_SETTLE_WINDOW_MS) || 24 * 60 * 60 * 1000;
 
     constructor(
         @InjectRepository(PendingHold)
@@ -42,16 +55,18 @@ export class PendingHoldsCronService {
         private refundsService: RefundsService,
     ) { }
 
-    @Cron(CronExpression.EVERY_HOUR)
+    // Cron cadence is env-overridable for testing; defaults to hourly in production.
+    // Set CRON_EXPRESSION="*/30 * * * * *" to run every 30 seconds while testing.
+    @Cron(process.env.CRON_EXPRESSION || CronExpression.EVERY_HOUR)
     async handleCron() {
         this.logger.debug('Running pending holds cron job...');
 
-        const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        const settleCutoff = new Date(Date.now() - PendingHoldsCronService.HOLD_SETTLE_WINDOW_MS);
 
         try {
             const recordsToProcess = await this.pendingHoldRepository.find({
                 where: {
-                    createdAt: LessThan(twentyFourHoursAgo),
+                    createdAt: LessThan(settleCutoff),
                 },
             });
 
