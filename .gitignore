@@ -30,5 +30,10 @@ Thumbs.db
 .env.test.local
 .env.production.local
 
+# Local-only backups & scratch (never commit - may contain secrets)
+*.bak
+.env.prod.bak
+scratch/
+
 # Testing
 /coverage
