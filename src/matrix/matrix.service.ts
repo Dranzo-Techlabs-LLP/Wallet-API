@@ -31,6 +31,44 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  */
 const USERNAME_RE = /^[a-z0-9][a-z0-9._-]{2,29}$/;
 
+/** Marks the one ConflictException that means "this localpart is registered". */
+const USERNAME_TAKEN_FLAG = '__matrixUsernameTaken';
+
+/**
+ * The requested localpart is already registered on the homeserver.
+ *
+ * Carries an explicit marker rather than being a bare ConflictException because
+ * exactly one caller may react by trying a different name - the auto-derived
+ * Google handle - and it must tell this apart from every other 409 thrown here.
+ * Notably "stored Matrix ID does not belong to this user" is a TAMPER signal and
+ * must never trigger a rename-and-retry.
+ *
+ * A tagged instance rather than a subclass on purpose: tsconfig targets ES5, and
+ * down-levelled `extends` of Nest's ES6 exception classes throws at construction
+ * ("Class constructor cannot be invoked without 'new'"). This keeps the 409
+ * status, the message, and every existing `instanceof ConflictException` check
+ * behaving exactly as before.
+ */
+export function matrixUsernameTakenException(localpart: string): ConflictException {
+    const error = new ConflictException(
+        `The username "${localpart}" is already taken. Please choose another.`,
+    );
+    (error as any)[USERNAME_TAKEN_FLAG] = true;
+    (error as any).localpart = localpart;
+    return error;
+}
+
+/**
+ * Is this the localpart-clash conflict above?
+ *
+ * Deliberately checks the explicit marker and NOT the message: a message regex
+ * would also match unrelated 409s, which is precisely the confusion that could
+ * let a tamper signal be "repaired" by renaming.
+ */
+export function isMatrixUsernameTaken(error: any): boolean {
+    return error?.[USERNAME_TAKEN_FLAG] === true;
+}
+
 /**
  * Talks to the Clariva Synapse homeserver (https://matrix.clarivahub.com).
  *
@@ -210,13 +248,16 @@ export class MatrixService {
             if (!this.isUserInUse(error)) {
                 throw error;
             }
-            // A user-CHOSEN handle that is already taken is a plain conflict: tell
-            // the caller so it can ask for another. Never adopt the existing
-            // account - it belongs to whoever registered it first.
+            // A handle that is already taken is a plain conflict. Never adopt the
+            // existing account - it belongs to whoever registered it first.
+            //
+            // Note Synapse NEVER frees the localpart of a deactivated account, so
+            // this also fires for names no live Clariva row holds. A user-CHOSEN
+            // handle must still surface (the client re-prompts); only the
+            // auto-derived Google handle may retry under a different name, which
+            // AuthService does by catching this specific type.
             if (username) {
-                throw new ConflictException(
-                    `The username "${localpart}" is already taken. Please choose another.`,
-                );
+                throw matrixUsernameTakenException(localpart);
             }
             // Legacy UUID path only: the localpart IS this user's immutable primary
             // key, so an existing account can only be one we created earlier for

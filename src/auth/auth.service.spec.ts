@@ -3,7 +3,7 @@ import { JwtService } from '@nestjs/jwt';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { ConflictException, UnauthorizedException } from '@nestjs/common';
 import { User } from '../users/user.entity';
-import { MatrixService } from '../matrix/matrix.service';
+import { MatrixService, matrixUsernameTakenException } from '../matrix/matrix.service';
 import { AuthService } from './auth.service';
 import { GoogleTokenVerifier } from './google-token-verifier';
 
@@ -135,15 +135,21 @@ describe('AuthService', () => {
             ).rejects.toThrow(/already taken/i);
         });
 
-        it('rolls the row back when the homeserver rejects the handle, so it is not reserved', async () => {
+        // THE safety-rule regression guard. A user-CHOSEN handle must surface the
+        // clash so the client can re-prompt - it must NEVER be silently renamed,
+        // even though this is the very exception type the derived Google handle
+        // retries on. mockRejectedValue (not ...Once) so a retry would succeed on
+        // call 2 and be caught by the call-count assertion.
+        it('rolls the row back when the homeserver rejects a CHOSEN handle, and never retries', async () => {
             const repo = makeRepo();
             const { service, matrix } = await build(repo);
-            matrix.provisionForUser.mockRejectedValueOnce(new ConflictException('already taken'));
+            matrix.provisionForUser.mockRejectedValue(matrixUsernameTakenException('ann'));
 
             await expect(
                 service.register({ email: 'a@b.com', password: 'hunter2hunter2', name: 'Ann', username: 'ann' } as any),
             ).rejects.toBeInstanceOf(ConflictException);
 
+            expect(matrix.provisionForUser).toHaveBeenCalledTimes(1);
             // No half-made account squatting on the username.
             expect(repo.rows).toHaveLength(0);
         });
@@ -261,11 +267,122 @@ describe('AuthService', () => {
         it('rolls back when provisioning fails for a new Google account', async () => {
             const repo = makeRepo();
             const { service, matrix } = await build(repo);
-            matrix.provisionForUser.mockRejectedValueOnce(new Error('homeserver down'));
+            // Not ...Once: a non-conflict error must NOT be retried at all.
+            matrix.provisionForUser.mockRejectedValue(new Error('homeserver down'));
 
             await expect(service.loginWithGoogle({ idToken: 'tok', isConsultant: 0 } as any))
                 .rejects.toThrow(/homeserver down/);
+            expect(matrix.provisionForUser).toHaveBeenCalledTimes(1);
             expect(repo.rows).toHaveLength(0);
+        });
+
+        // Synapse never frees a DEACTIVATED localpart, so a derived handle can
+        // clash with a name no live Clariva row holds. The user never picked it,
+        // so the right repair is the next candidate - not a "choose another" 409
+        // that the Google flow has no handle picker to satisfy.
+        it('advances to the next derived handle when Synapse already holds the name', async () => {
+            const repo = makeRepo();
+            const { service, matrix } = await build(repo);
+            matrix.provisionForUser
+                .mockRejectedValueOnce(matrixUsernameTakenException('gmail-user'))
+                .mockImplementationOnce(async (_id: string, _stored: any, _name: string, username: string) => ({
+                    userId: `@${username}:clarivahub.com`,
+                    accessToken: 'tok',
+                    deviceId: 'DEV',
+                }));
+
+            const res: any = await service.loginWithGoogle({ idToken: 'tok', isConsultant: 1 } as any);
+
+            expect(repo.rows).toHaveLength(1);
+            expect(repo.rows[0].username).toBe('gmail-user2');
+            expect(repo.rows[0].matrixUserId).toBe('@gmail-user2:clarivahub.com');
+            expect(res.token).toBe('jwt.token.here');
+        });
+
+        it('skips a candidate already held in the Wallet DB while advancing', async () => {
+            const repo = makeRepo([{ id: 'someone-else', email: 'other@example.com', username: 'gmail-user2' } as any]);
+            const { service, matrix } = await build(repo);
+            matrix.provisionForUser
+                .mockRejectedValueOnce(matrixUsernameTakenException('gmail-user'))
+                .mockImplementationOnce(async (_id: string, _stored: any, _name: string, username: string) => ({
+                    userId: `@${username}:clarivahub.com`,
+                    accessToken: 'tok',
+                    deviceId: 'DEV',
+                }));
+
+            await service.loginWithGoogle({ idToken: 'tok', isConsultant: 0 } as any);
+
+            const created = repo.rows.find((r: any) => r.email === 'gmail-user@example.com');
+            expect(created.username).toBe('gmail-user3'); // 2 is taken locally
+        });
+
+        it('rolls back and surfaces the clash when every derived candidate is exhausted', async () => {
+            const repo = makeRepo();
+            const { service, matrix } = await build(repo);
+            matrix.provisionForUser.mockRejectedValue(matrixUsernameTakenException('gmail-user'));
+
+            await expect(service.loginWithGoogle({ idToken: 'tok', isConsultant: 0 } as any))
+                .rejects.toBeInstanceOf(ConflictException);
+            expect(repo.rows).toHaveLength(0);
+        });
+
+        // A tamper signal must never be mistaken for a name clash and renamed.
+        it('does not retry a non-clash conflict (tampered stored Matrix ID)', async () => {
+            const repo = makeRepo();
+            const { service, matrix } = await build(repo);
+            matrix.provisionForUser.mockRejectedValue(
+                new ConflictException('Stored Matrix ID @x:clarivahub.com does not belong to this user'),
+            );
+
+            await expect(service.loginWithGoogle({ idToken: 'tok', isConsultant: 0 } as any))
+                .rejects.toThrow(/does not belong to this user/);
+            expect(matrix.provisionForUser).toHaveBeenCalledTimes(1);
+            expect(repo.rows).toHaveLength(0);
+        });
+
+        it('tells a Google SIGN-UP that the email already has an account', async () => {
+            const repo = makeRepo([{ id: UUID, email: 'gmail-user@example.com', isConsultant: 0 } as any]);
+            const { service } = await build(repo);
+
+            await expect(service.loginWithGoogle({ idToken: 'tok', mode: 'signup' } as any))
+                .rejects.toThrow(/already exists.*sign in/i);
+        });
+
+        it('lets the same existing account sign IN without complaint', async () => {
+            const repo = makeRepo([{ id: UUID, email: 'gmail-user@example.com', isConsultant: 0, matrixUserId: '@gm:clarivahub.com' } as any]);
+            const { service } = await build(repo);
+
+            const res: any = await service.loginWithGoogle({ idToken: 'tok', mode: 'signin' } as any);
+
+            expect(res.needsRole).toBeUndefined();
+            expect(res.token).toBe('jwt.token.here');
+        });
+
+        // Role prompt is driven by "is the role unknown", not "is the user new".
+        it('asks an existing row whose role was never set, then backfills it', async () => {
+            const repo = makeRepo([
+                { id: UUID, email: 'gmail-user@example.com', isConsultant: null, matrixUserId: '@gm:clarivahub.com' } as any,
+            ]);
+            const { service } = await build(repo);
+
+            const ask: any = await service.loginWithGoogle({ idToken: 'tok' } as any);
+            expect(ask.needsRole).toBe(true);
+            expect(ask.isExisting).toBe(true);
+
+            const res: any = await service.loginWithGoogle({ idToken: 'tok', isConsultant: 1 } as any);
+            expect(res.needsRole).toBeUndefined();
+            expect(repo.rows[0].isConsultant).toBe(1);
+        });
+
+        it('never flips the role of an account that already has one', async () => {
+            const repo = makeRepo([
+                { id: UUID, email: 'gmail-user@example.com', isConsultant: 0, matrixUserId: '@gm:clarivahub.com' } as any,
+            ]);
+            const { service } = await build(repo);
+
+            await service.loginWithGoogle({ idToken: 'tok', isConsultant: 1 } as any);
+
+            expect(repo.rows[0].isConsultant).toBe(0); // unchanged
         });
 
         // An existing user signing in with Google must NOT be re-asked for a role.
@@ -307,7 +424,10 @@ describe('AuthService', () => {
         it('a Google-only account cannot be signed into with a password', async () => {
             const repo = makeRepo();
             const { service } = await build(repo);
-            await service.loginWithGoogle({ idToken: 'tok' } as any);
+            // isConsultant is required here: without it the call only returns
+            // needsRole and creates nothing, so the assertion below would pass
+            // for the wrong reason (no account at all, rather than no password).
+            await service.loginWithGoogle({ idToken: 'tok', isConsultant: 0 } as any);
 
             await expect(
                 service.login({ email: 'gmail-user@example.com', password: 'anything-at-all' } as any),

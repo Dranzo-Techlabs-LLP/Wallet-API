@@ -11,7 +11,7 @@ import { JwtService } from '@nestjs/jwt';
 import { randomBytes, scrypt, timingSafeEqual } from 'crypto';
 import { promisify } from 'util';
 import { User } from '../users/user.entity';
-import { MatrixService, MatrixSession } from '../matrix/matrix.service';
+import { MatrixService, MatrixSession, isMatrixUsernameTaken } from '../matrix/matrix.service';
 import { RegisterDto, USERNAME_PATTERN as USERNAME_RE } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { GoogleLoginDto } from './dto/google-login.dto';
@@ -25,6 +25,9 @@ const SCRYPT_N = 16384;
 const SCRYPT_R = 8;
 const SCRYPT_P = 1;
 const SCRYPT_KEYLEN = 64;
+
+/** How many derived-handle candidates to try before falling back to the UUID. */
+const USERNAME_ALLOCATION_ATTEMPTS = 50;
 
 export interface PublicUser {
     id: string;
@@ -50,6 +53,11 @@ export interface GoogleRoleRequired {
     needsRole: true;
     email: string;
     name: string | null;
+    /**
+     * True when a Clariva row already exists and only its role is missing, so
+     * the client can word the prompt as finishing setup rather than signing up.
+     */
+    isExisting: boolean;
 }
 
 /**
@@ -187,25 +195,40 @@ export class AuthService {
      */
     async loginWithGoogle(dto: GoogleLoginDto): Promise<AuthResult | GoogleRoleRequired> {
         const identity = await this.googleTokenVerifier.verify(dto.idToken);
+        const email = this.normalizeEmail(identity.email);
 
-        let user: User = await this.usersRepository.findOne({ where: { email: identity.email } });
+        let user: User = await this.usersRepository.findOne({ where: { email } });
 
-        // First-time Google sign-in with no role chosen: do NOT create the account
-        // yet. Tell the client to ask, then it re-posts with isConsultant. Creating
-        // it here would silently make every Google user a normal client with no way
-        // to become a consultant at sign-up.
+        // Tapped "Sign up with Google" but the account already exists. Say so
+        // plainly instead of silently signing them in, so the user learns which
+        // of the two buttons is theirs. Only the sign-up screen sends this mode;
+        // the sign-in screen (and re-auth) omit it and fall through.
+        if (dto.mode === 'signup' && user) {
+            throw new ConflictException(
+                'An account with this email already exists. Please sign in instead.',
+            );
+        }
+
+        // Whose role is still unknown? A brand-new account always; an existing
+        // row only if it was created out-of-band and never got a value. Rows
+        // written by register()/this method always hold 0 or 1, so a returning
+        // user is never re-asked - which is exactly the requirement.
+        //
         // `== null` on purpose: it catches BOTH undefined and an explicit JSON
         // null. class-validator's @IsOptional() lets a literal null through
-        // untouched, so a strict `=== undefined` check would fall through here
-        // and silently create a normal-client account with no role prompt - the
-        // exact outcome this gate exists to prevent. The Android client happens
-        // to omit the field today only because kotlinx.serialization defaults to
-        // encodeDefaults=false; flipping that one global would break the gate.
-        if (!user && dto.isConsultant == null) {
+        // untouched, so a strict `=== undefined` check would fall through and
+        // silently create a normal-client account with no role prompt - the
+        // exact outcome this gate exists to prevent.
+        const roleUnknown = user ? user.isConsultant == null : true;
+        if (roleUnknown && dto.isConsultant == null) {
+            // Do NOT create the account yet. The client asks, then re-posts with
+            // isConsultant. Creating it here would silently make every Google
+            // user a normal client with no way to opt in at sign-up.
             return {
                 needsRole: true,
-                email: identity.email,
+                email,
                 name: identity.name ?? null,
+                isExisting: Boolean(user),
             };
         }
 
@@ -216,15 +239,25 @@ export class AuthService {
                 await this.usersRepository.update({ id: user.id }, { googleId: identity.sub });
                 user.googleId = identity.sub;
             }
+            // Backfill a role that was never set. Deliberately only when it is
+            // currently unset: a Google sign-in must never silently flip the role
+            // of an account that already has one.
+            if (user.isConsultant == null && dto.isConsultant != null) {
+                await this.usersRepository.update({ id: user.id }, { isConsultant: dto.isConsultant });
+                user.isConsultant = dto.isConsultant;
+            }
         } else {
             // New Google account. Populate exactly the same columns an email
             // sign-up would, so both paths produce identical rows apart from
             // passwordHash (null here) and googleId (set here).
+            const seed = this.usernameSeedFromEmail(email);
+            const allocated = await this.allocateUsernameFromSeed(seed);
+
             const entity = this.usersRepository.create({
-                email: identity.email,
+                email,
                 googleId: identity.sub,
-                username: await this.allocateUsernameFromEmail(identity.email),
-                name: identity.name || identity.email.split('@')[0],
+                username: allocated?.username ?? null,
+                name: identity.name || email.split('@')[0],
                 passwordHash: null,
                 isConsultant: dto.isConsultant ?? 0,
             });
@@ -235,7 +268,7 @@ export class AuthService {
             } catch (e) {
                 // Two concurrent Google sign-ins for a new email race here.
                 if (e?.code === 'ER_DUP_ENTRY') {
-                    user = await this.usersRepository.findOne({ where: { email: identity.email } });
+                    user = await this.usersRepository.findOne({ where: { email } });
                     if (!user) throw e;
                     isNew = false;
                 } else {
@@ -246,9 +279,11 @@ export class AuthService {
             if (isNew) {
                 // Propagate failures for a brand-new account, exactly as email
                 // sign-up does: better to surface the error and roll back than to
-                // hand back an account with no Matrix identity.
+                // hand back an account with no Matrix identity. The handle here
+                // was DERIVED, so a homeserver clash advances to the next
+                // candidate rather than failing with "choose another".
                 try {
-                    await this.provisionMatrix(user);
+                    await this.provisionMatrixForDerivedUsername(user, seed, allocated?.attempt ?? 0);
                 } catch (e) {
                     await this.usersRepository.delete({ id: user.id }).catch(() => undefined);
                     throw e;
@@ -441,26 +476,108 @@ export class AuthService {
     }
 
     /**
-     * Google sign-up cannot prompt for a handle mid-flow, so derive one from the
-     * verified email and settle collisions with a numeric suffix. Strictly
+     * The stable seed a derived handle is built from. Pure, no I/O. Strictly
      * validated the same way as a typed handle - never a lossy transform.
      */
-    private async allocateUsernameFromEmail(email: string): Promise<string> {
+    private usernameSeedFromEmail(email: string): string {
         const base = (email.split('@')[0] || '')
             .toLowerCase()
             .replace(/[^a-z0-9._-]/g, '')
             .replace(/^[^a-z0-9]+/, '')
             .slice(0, 24);
-        const seed = base.length >= 3 ? base : `user${base}`.slice(0, 24);
+        return base.length >= 3 ? base : `user${base}`.slice(0, 24);
+    }
 
-        for (let attempt = 0; attempt < 50; attempt++) {
-            const candidate = attempt === 0 ? seed : `${seed}${attempt + 1}`;
-            if (!USERNAME_RE.test(candidate)) continue;
+    /** attempt 0 -> seed, 1 -> seed2, 2 -> seed3 ... (the historic numbering). */
+    private usernameCandidate(seed: string, attempt: number): string | null {
+        const candidate = attempt === 0 ? seed : `${seed}${attempt + 1}`;
+        return USERNAME_RE.test(candidate) ? candidate : null;
+    }
+
+    /**
+     * First candidate at-or-after `from` that is free in the Wallet DB.
+     *
+     * Returns the ATTEMPT INDEX alongside the name so a caller can resume from
+     * `attempt + 1`. Deriving that index by parsing digits off the end of the
+     * name would be wrong - a seed can legitimately end in a digit
+     * ("imran.gutzz2@..." -> seed "imran.gutzz2") and the parse would then loop
+     * forever on a single name.
+     *
+     * null = exhausted; the caller falls back to the legacy UUID localpart.
+     */
+    private async allocateUsernameFromSeed(
+        seed: string,
+        from = 0,
+    ): Promise<{ username: string; attempt: number } | null> {
+        for (let attempt = from; attempt < USERNAME_ALLOCATION_ATTEMPTS; attempt++) {
+            const candidate = this.usernameCandidate(seed, attempt);
+            if (!candidate) continue;
             const taken = await this.usersRepository.findOne({ where: { username: candidate } });
-            if (!taken) return candidate;
+            if (!taken) return { username: candidate, attempt };
         }
-        // Fall back to the UUID path rather than looping forever.
         return null;
+    }
+
+    /**
+     * Provision Matrix for a handle that was DERIVED from the email, never chosen.
+     *
+     * Synapse never frees the localpart of a deactivated account, and
+     * allocateUsernameFromSeed() only sees the Wallet DB - so a derived handle
+     * can collide with a name no live Clariva row holds. Because the user never
+     * picked this name, quietly advancing to the next candidate is the correct
+     * repair; a 409 "please choose another" is not, because the Google flow has
+     * no handle picker to send them to.
+     *
+     * MUST NOT be used for a user-CHOSEN handle. That is why the retry lives
+     * here and not inside provisionMatrix(), which email sign-up still uses
+     * unchanged - there is no shared boolean that could be passed wrongly.
+     */
+    private async provisionMatrixForDerivedUsername(
+        user: User,
+        seed: string,
+        firstAttempt: number,
+    ): Promise<void> {
+        if (!this.matrixService.isEnabled) return;
+        // No derived handle at all (allocator exhausted): legacy UUID localpart,
+        // nothing to rename. Identical behaviour to the chosen-handle path.
+        if (!user.username) return this.provisionMatrix(user);
+
+        let username = user.username;
+        let attempt = firstAttempt;
+
+        for (;;) {
+            try {
+                const session = await this.matrixService.provisionForUser(
+                    user.id, null, user.name, username,
+                );
+
+                const patch: Partial<User> = { matrixUserId: session.userId };
+                if (username !== user.username) patch.username = username;
+                if (!user.Webuddy_name) patch.Webuddy_name = session.userId;
+
+                await this.usersRepository.update({ id: user.id }, patch);
+                user.matrixUserId = session.userId;
+                if (patch.username) user.username = patch.username;
+                if (patch.Webuddy_name) user.Webuddy_name = patch.Webuddy_name;
+                return;
+            } catch (e) {
+                // ONLY a homeserver localpart collision is retryable. A homeserver
+                // outage, a bad config, a BadRequest from normalizeUsername, or the
+                // "stored Matrix ID does not belong to this user" tamper 409 all
+                // propagate untouched and roll the signup back.
+                if (!isMatrixUsernameTaken(e)) throw e;
+
+                this.logger.warn(
+                    `Derived handle "${username}" is taken on Synapse (most likely a ` +
+                    'deactivated account Synapse will never free); trying the next candidate',
+                );
+
+                const next = await this.allocateUsernameFromSeed(seed, attempt + 1);
+                if (!next) throw e; // exhausted: surface the original 409
+                username = next.username;
+                attempt = next.attempt;
+            }
+        }
     }
 
     private async issueToken(user: User): Promise<string> {

@@ -11,9 +11,22 @@ export class GoogleLoginDto {
     @MaxLength(4096)
     idToken: string;
 
-    // 0 = normal user (client), 1 = consultant. Only applied on first sign-up.
+    // 0 = normal user (client), 1 = consultant. Applied when the account is
+    // created, or to backfill a row whose role was never set.
     @IsInt()
     @IsIn([0, 1])
     @IsOptional()
     isConsultant?: number;
+
+    /**
+     * Which screen the user tapped from.
+     *
+     * 'signup' makes an existing email a hard 409 ("please sign in instead")
+     * rather than a silent sign-in. Omitted by the sign-in screen and by
+     * re-authorisation, both of which must keep working for existing accounts.
+     */
+    @IsString()
+    @IsIn(['signin', 'signup'])
+    @IsOptional()
+    mode?: 'signin' | 'signup';
 }
