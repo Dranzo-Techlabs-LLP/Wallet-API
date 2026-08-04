@@ -411,8 +411,16 @@ export class AuthService {
     }
 
     async login(dto: LoginDto): Promise<AuthResult> {
-        const email = this.normalizeEmail(dto.email);
-        const user: User = await this.usersRepository.findOne({ where: { email } });
+        // `identifier` is the current field; `email` is the same value under the
+        // name older app builds send.
+        const raw = this.normalizeEmail(dto.identifier ?? dto.email ?? '');
+
+        // An '@' can only appear in an email - the username charset excludes it
+        // (USERNAME_PATTERN), so this cannot be ambiguous, and a username can
+        // never be typed to match some other account's email address.
+        const user: User = raw.includes('@')
+            ? await this.usersRepository.findOne({ where: { email: raw } })
+            : await this.usersRepository.findOne({ where: { username: raw } });
 
         // Always run a verification so timing does not reveal whether the
         // account exists, and always fail with the same message.
@@ -421,7 +429,7 @@ export class AuthService {
             : await this.verifyPassword(dto.password, await this.dummyHash);
 
         if (!user || !ok) {
-            throw new UnauthorizedException('Invalid email or password');
+            throw new UnauthorizedException('Invalid email/username or password');
         }
 
         return { token: await this.issueToken(user), user: this.toPublicUser(user) };

@@ -194,6 +194,54 @@ describe('AuthService', () => {
             expect(res.token).toBe('jwt.token.here');
         });
 
+        it('signs in with the USERNAME instead of the email', async () => {
+            const repo = makeRepo();
+            const { service } = await build(repo);
+            await service.register({ email: 'a@b.com', password: 'hunter2hunter2', name: 'Ann', username: 'ann' } as any);
+
+            const res = await service.login({ identifier: 'ANN', password: 'hunter2hunter2' } as any);
+            expect(res.user.username).toBe('ann');
+            expect(res.token).toBe('jwt.token.here');
+        });
+
+        it('signs in with the email via the new identifier field', async () => {
+            const repo = makeRepo();
+            const { service } = await build(repo);
+            await service.register({ email: 'a@b.com', password: 'hunter2hunter2', name: 'Ann', username: 'ann' } as any);
+
+            const res = await service.login({ identifier: 'a@b.com', password: 'hunter2hunter2' } as any);
+            expect(res.user.email).toBe('a@b.com');
+        });
+
+        // An installed APK still posts { email }. It must keep working.
+        it('still accepts the legacy email field', async () => {
+            const repo = makeRepo();
+            const { service } = await build(repo);
+            await service.register({ email: 'a@b.com', password: 'hunter2hunter2', name: 'Ann', username: 'ann' } as any);
+
+            await expect(service.login({ email: 'a@b.com', password: 'hunter2hunter2' } as any)).resolves.toBeDefined();
+        });
+
+        // '@' cannot occur in a username, so an identifier is never ambiguous
+        // and a username can never be typed to reach someone else's account.
+        it('never resolves a username against the email column', async () => {
+            const repo = makeRepo([
+                { id: 'other', email: 'ann', username: 'someone-else', passwordHash: null } as any,
+            ]);
+            const { service } = await build(repo);
+            await service.register({ email: 'a@b.com', password: 'hunter2hunter2', name: 'Ann', username: 'ann' } as any);
+
+            const res = await service.login({ identifier: 'ann', password: 'hunter2hunter2' } as any);
+            expect(res.user.username).toBe('ann');
+            expect(res.user.id).not.toBe('other');
+        });
+
+        it('rejects an unknown username with the same error as a wrong password', async () => {
+            const { service } = await build(makeRepo());
+            await expect(service.login({ identifier: 'nobody', password: 'x' } as any))
+                .rejects.toBeInstanceOf(UnauthorizedException);
+        });
+
         it('rejects the wrong password', async () => {
             const { service } = await build(makeRepo());
             await service.register({ email: 'a@b.com', password: 'hunter2hunter2', name: 'Ann', username: 'ann' } as any);
