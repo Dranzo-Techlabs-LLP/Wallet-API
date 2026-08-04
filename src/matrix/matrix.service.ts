@@ -15,6 +15,19 @@ export interface MatrixSession {
     userId: string;
     accessToken: string;
     deviceId: string;
+    /**
+     * Passphrase for the user's Matrix secret storage (4S), so every device can
+     * unlock the key backup and read history WITHOUT the user verifying it.
+     *
+     * PRIVACY: this is the deliberate trade-off for "history on any device with
+     * no prompts" - a device that joins later can only obtain older room keys
+     * from the backup, and something must hold the key to that backup. Here the
+     * server does, which means the operator CAN decrypt message history. Do not
+     * describe the product as end-to-end encrypted against Clariva itself.
+     *
+     * Derived, never stored: see deriveRecoveryPassphrase().
+     */
+    recoveryPassphrase?: string;
 }
 
 interface MatrixResponse {
@@ -403,6 +416,31 @@ export class MatrixService {
      * ExternalSession.deviceId is non-null and its parser hard-errors without it.
      * Fail loudly here rather than emitting an object with an undefined field.
      */
+    /**
+     * The 4S passphrase for a user, derived not stored.
+     *
+     * HMAC over an immutable id with a server-side secret, so it is stable for
+     * the life of the account (every device derives the same one) and cannot be
+     * guessed from the user id alone. Nothing is persisted: rotating
+     * MATRIX_RECOVERY_SECRET invalidates every user's secret storage, which
+     * would orphan their key backups - treat it as permanent.
+     *
+     * Falls back to the registration shared secret so an existing deployment
+     * works without new config; set MATRIX_RECOVERY_SECRET to decouple them.
+     */
+    deriveRecoveryPassphrase(userId: string): string | undefined {
+        const secret =
+            this.configService.get<string>('MATRIX_RECOVERY_SECRET') ||
+            this.configService.get<string>('MATRIX_REGISTRATION_SHARED_SECRET');
+        if (!secret || !userId) return undefined;
+        // base64url, 32 bytes of entropy - well above what 4S needs.
+        return createHmac('sha256', secret)
+            .update(`clariva-recovery-v1:${userId}`)
+            .digest('base64')
+            .replace(/[+/=]/g, '')
+            .slice(0, 43);
+    }
+
     private assertCompleteSession(body: any, context: string): MatrixSession {
         const { user_id: userId, access_token: accessToken, device_id: deviceId } = body || {};
         const missing = [
@@ -416,7 +454,12 @@ export class MatrixService {
                 `Incomplete Matrix session from ${context}: missing ${missing.join(', ')}`,
             );
         }
-        return { userId, accessToken, deviceId };
+        return {
+            userId,
+            accessToken,
+            deviceId,
+            recoveryPassphrase: this.deriveRecoveryPassphrase(userId),
+        };
     }
 
     /**

@@ -136,11 +136,33 @@ describe('MatrixService', () => {
                 status: 200,
                 body: { user_id: `@${UUID_A}:clarivahub.com`, access_token: 'tok', device_id: 'DEV' },
             });
-            await expect(service.login(UUID_A, 'p')).resolves.toEqual({
+            await expect(service.login(UUID_A, 'p')).resolves.toMatchObject({
                 userId: `@${UUID_A}:clarivahub.com`,
                 accessToken: 'tok',
                 deviceId: 'DEV',
             });
+        });
+
+        it('carries a recovery passphrase so any device can open the key backup', async () => {
+            (service as any).call = async () => ({
+                status: 200,
+                body: { user_id: `@${UUID_A}:clarivahub.com`, access_token: 'tok', device_id: 'DEV' },
+            });
+            const session = await service.login(UUID_A, 'p');
+            expect(session.recoveryPassphrase).toEqual(expect.any(String));
+            expect(session.recoveryPassphrase!.length).toBeGreaterThanOrEqual(32);
+        });
+
+        it('derives the SAME passphrase every time for a user, and different ones across users', () => {
+            const a1 = service.deriveRecoveryPassphrase(`@${UUID_A}:clarivahub.com`);
+            const a2 = service.deriveRecoveryPassphrase(`@${UUID_A}:clarivahub.com`);
+            const b = service.deriveRecoveryPassphrase('@someone-else:clarivahub.com');
+            // Stable: every device of the same user must derive an identical
+            // passphrase, or the second device cannot open the first one's 4S.
+            expect(a1).toBe(a2);
+            expect(a1).not.toBe(b);
+            // Never leaks the input it was derived from.
+            expect(a1).not.toContain(UUID_A);
         });
     });
 
