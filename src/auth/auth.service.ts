@@ -5,17 +5,24 @@ import {
     UnauthorizedException,
     InternalServerErrorException,
     BadRequestException,
+    OnApplicationBootstrap,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
 import { JwtService } from '@nestjs/jwt';
-import { randomBytes, scrypt, timingSafeEqual } from 'crypto';
+import { ConfigService } from '@nestjs/config';
+import { randomBytes, randomInt, createHmac, scrypt, timingSafeEqual } from 'crypto';
 import { promisify } from 'util';
 import { User } from '../users/user.entity';
+import { PasswordReset } from './password-reset.entity';
 import { MatrixService, MatrixSession, isMatrixUsernameTaken } from '../matrix/matrix.service';
 import { RegisterDto, USERNAME_PATTERN as USERNAME_RE } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { GoogleLoginDto } from './dto/google-login.dto';
 import { DeactivateAccountDto } from './dto/deactivate-account.dto';
+import { ForgotPasswordDto } from './dto/forgot-password.dto';
+import { ResetPasswordDto } from './dto/reset-password.dto';
+import { MailService } from './mail.service';
 import { GoogleTokenVerifier } from './google-token-verifier';
 
 const scryptAsync: any = promisify(scrypt);
@@ -69,8 +76,18 @@ export interface GoogleRoleRequired {
  * compromising one does not yield the other.
  */
 @Injectable()
-export class AuthService {
+export class AuthService implements OnApplicationBootstrap {
     private readonly logger = new Logger(AuthService.name);
+
+    // Password-reset code policy.
+    private static readonly RESET_CODE_TTL_MS = 15 * 60 * 1000; // 15 minutes
+    private static readonly RESET_MAX_ATTEMPTS = 5;
+
+    // Server-side secret ("pepper") that keys the reset-code HMAC. Never stored in
+    // the DB, so a leak of password_resets alone cannot brute-force the low-entropy
+    // 6-digit codes offline. Falls back to JWT_SECRET (always set) so no new env is
+    // required for it to be non-empty.
+    private readonly resetCodePepper: string;
 
     // Compared against when the email is unknown, so a wrong-email and a
     // wrong-password request take the same amount of work. Without this, the
@@ -80,11 +97,49 @@ export class AuthService {
     constructor(
         @InjectRepository(User)
         private readonly usersRepository: any,
+        @InjectRepository(PasswordReset)
+        private readonly passwordResetRepository: Repository<PasswordReset>,
         private readonly jwtService: JwtService,
         private readonly matrixService: MatrixService,
         private readonly googleTokenVerifier: GoogleTokenVerifier,
+        private readonly mailService: MailService,
+        private readonly config: ConfigService,
     ) {
+        this.resetCodePepper =
+            this.config.get<string>('PASSWORD_RESET_SECRET') ||
+            this.config.get<string>('JWT_SECRET') ||
+            this.config.get<string>('MATRIX_REGISTRATION_SHARED_SECRET') ||
+            '';
         this.dummyHash = this.hashPassword('clariva-timing-equalisation-placeholder');
+    }
+
+    /**
+     * `synchronize: false` is set on the TypeORM connection, so a newly-added
+     * entity does not create its table on its own. Create password_resets if it
+     * is missing. Idempotent — a no-op once the table exists.
+     */
+    async onApplicationBootstrap() {
+        try {
+            await this.usersRepository.manager.query(
+                `CREATE TABLE IF NOT EXISTS password_resets (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    email VARCHAR(255) NOT NULL,
+                    codeHash VARCHAR(128) NOT NULL,
+                    expiresAt DATETIME NOT NULL,
+                    attempts INT NOT NULL DEFAULT 0,
+                    consumed TINYINT NOT NULL DEFAULT 0,
+                    createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    INDEX idx_password_resets_email (email)
+                )`,
+            );
+        } catch (err) {
+            this.logger.error(
+                'Failed to ensure the password_resets table exists; forgot-password ' +
+                'will not work until this is fixed. See src/auth/password-reset.entity.ts ' +
+                'for the schema.',
+                err?.stack ?? err,
+            );
+        }
     }
 
     normalizeEmail(email: string): string {
@@ -481,6 +536,136 @@ export class AuthService {
             return { available: false, reason: 'That username is already taken' };
         }
         return { available: true };
+    }
+
+    /**
+     * Is this email free to register? Powers the live "already registered" hint on
+     * the sign-up form, mirroring checkUsernameAvailability.
+     *
+     * Like any sign-up availability check this inherently reveals whether an email
+     * exists — unavoidable for the feature, which is why the endpoint is throttled.
+     * Sign-IN deliberately does NOT expose this (it returns a generic error).
+     */
+    async checkEmailAvailability(rawEmail: string): Promise<{ available: boolean; reason?: string }> {
+        const email = this.normalizeEmail(rawEmail);
+        if (!email || !email.includes('@') || email.length < 5) {
+            return { available: false, reason: 'Enter a valid email address' };
+        }
+        const taken = await this.usersRepository.findOne({ where: { email } });
+        if (taken) {
+            return { available: false, reason: 'That email is already registered' };
+        }
+        return { available: true };
+    }
+
+    /**
+     * Start a password reset: email a 6-digit code to the account owner.
+     *
+     * ALWAYS returns { ok: true } whether or not the email exists, so it cannot be
+     * used to enumerate accounts. A code is only generated and sent for an existing
+     * EMAIL account (one that has a passwordHash) — Google-only accounts have no
+     * password to reset and sign in with Google instead.
+     */
+    async forgotPassword(dto: ForgotPasswordDto): Promise<{ ok: true }> {
+        const email = this.normalizeEmail(dto.email);
+        const user: User = await this.usersRepository.findOne({ where: { email } });
+
+        if (user && user.passwordHash) {
+            const code = this.generateResetCode();
+            const codeHash = this.hashResetCode(email, code);
+            const expiresAt = new Date(Date.now() + AuthService.RESET_CODE_TTL_MS);
+
+            // Invalidate any earlier live codes for this email so only the newest works.
+            await this.passwordResetRepository.update({ email, consumed: 0 }, { consumed: 1 });
+            await this.passwordResetRepository.save(
+                this.passwordResetRepository.create({ email, codeHash, expiresAt }),
+            );
+
+            // Fire-and-forget: do NOT await the SMTP round-trip. Awaiting it would
+            // make this branch measurably slower than the unknown/Google-only branches,
+            // a timing oracle for "is this a registered password account". It also
+            // keeps the request from hanging on a slow/unreachable SMTP server.
+            void this.mailService.sendPasswordResetCode(email, code).catch((e) =>
+                this.logger.error(`Failed to send reset code to ${email}: ${e?.message}`),
+            );
+        } else if (user && !user.passwordHash) {
+            this.logger.log(`forgot-password for Google-only account ${email}; nothing to reset.`);
+        } else {
+            this.logger.log('forgot-password for an unknown email; returning ok without sending.');
+        }
+
+        return { ok: true };
+    }
+
+    /**
+     * Complete a password reset: verify the code, then set the new password.
+     *
+     * Every failure mode (no challenge, expired, too many attempts, wrong code)
+     * returns the SAME generic error so nothing about the account leaks. The code
+     * is single-use and attempt-capped.
+     */
+    async resetPassword(dto: ResetPasswordDto): Promise<{ ok: true }> {
+        const email = this.normalizeEmail(dto.email);
+        const invalid = () =>
+            new BadRequestException('That code is invalid or has expired. Please request a new one.');
+
+        const record = await this.passwordResetRepository.findOne({
+            where: { email, consumed: 0 },
+            order: { createdAt: 'DESC' },
+        });
+        if (!record) throw invalid();
+
+        if (new Date(record.expiresAt).getTime() < Date.now()) {
+            await this.passwordResetRepository.update({ id: record.id }, { consumed: 1 });
+            throw invalid();
+        }
+
+        // Atomically count this attempt while enforcing the cap + single-use in ONE
+        // statement. A non-atomic "read attempts, check < 5, increment later" lets
+        // concurrent requests each pass the check before any increment lands, which
+        // defeats the per-code brute-force limit on the low-entropy 6-digit code.
+        const claim: any = await this.passwordResetRepository.manager.query(
+            `UPDATE password_resets SET attempts = attempts + 1
+               WHERE id = ? AND consumed = 0 AND attempts < ?`,
+            [record.id, AuthService.RESET_MAX_ATTEMPTS],
+        );
+        if (Number(claim?.affectedRows ?? 0) === 0) {
+            // Cap reached or already used: burn the challenge and reject.
+            await this.passwordResetRepository.update({ id: record.id }, { consumed: 1 });
+            throw invalid();
+        }
+
+        const matches = this.hashResetCode(email, dto.code) === record.codeHash;
+        if (!matches) {
+            // The attempt was already counted atomically above.
+            throw invalid();
+        }
+
+        const user: User = await this.usersRepository.findOne({ where: { email } });
+        if (!user) {
+            await this.passwordResetRepository.update({ id: record.id }, { consumed: 1 });
+            throw invalid();
+        }
+
+        const passwordHash = await this.hashPassword(dto.newPassword);
+        await this.usersRepository.update({ id: user.id }, { passwordHash });
+        await this.passwordResetRepository.update({ id: record.id }, { consumed: 1 });
+        this.logger.log(`Password reset completed for ${email}`);
+        return { ok: true };
+    }
+
+    /** Cryptographically-random 6-digit code, zero-padded. */
+    private generateResetCode(): string {
+        return String(randomInt(0, 1_000_000)).padStart(6, '0');
+    }
+
+    /**
+     * Keyed HMAC over `email:code` using the server-side pepper. The pepper is not
+     * in the DB, so a leak of password_resets cannot brute-force the 6-digit codes
+     * offline (a plain unsalted hash of a 10^6 keyspace would be trivially reversed).
+     */
+    private hashResetCode(email: string, code: string): string {
+        return createHmac('sha256', this.resetCodePepper).update(`${email}:${code}`).digest('hex');
     }
 
     /**

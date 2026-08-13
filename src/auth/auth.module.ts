@@ -3,15 +3,17 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
 import { User } from '../users/user.entity';
+import { PasswordReset } from './password-reset.entity';
 import { MatrixModule } from '../matrix/matrix.module';
 import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
 import { JwtAuthGuard } from './jwt-auth.guard';
 import { GoogleTokenVerifier } from './google-token-verifier';
+import { MailService } from './mail.service';
 
 @Module({
     imports: [
-        TypeOrmModule.forFeature([User]),
+        TypeOrmModule.forFeature([User, PasswordReset]),
         MatrixModule,
         ConfigModule,
         JwtModule.registerAsync({
@@ -34,7 +36,7 @@ import { GoogleTokenVerifier } from './google-token-verifier';
         }),
     ],
     controllers: [AuthController],
-    providers: [AuthService, JwtAuthGuard, GoogleTokenVerifier],
+    providers: [AuthService, JwtAuthGuard, GoogleTokenVerifier, MailService],
     exports: [AuthService, JwtAuthGuard],
 })
 export class AuthModule { }

@@ -5,6 +5,8 @@ import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { GoogleLoginDto } from './dto/google-login.dto';
 import { DeactivateAccountDto } from './dto/deactivate-account.dto';
+import { ForgotPasswordDto } from './dto/forgot-password.dto';
+import { ResetPasswordDto } from './dto/reset-password.dto';
 import { JwtAuthGuard } from './jwt-auth.guard';
 
 /**
@@ -40,6 +42,36 @@ export class AuthController {
     @Get('username-available')
     usernameAvailable(@Query('username') username: string) {
         return this.authService.checkUsernameAvailability(username || '');
+    }
+
+    /**
+     * Live email-availability check for the sign-up form, mirroring
+     * username-available. Throttled because it inherently reveals whether an
+     * email is registered.
+     */
+    @Get('email-available')
+    @Throttle(30, 900) // 30 / 15 min per IP
+    emailAvailable(@Query('email') email: string) {
+        return this.authService.checkEmailAvailability(email || '');
+    }
+
+    /**
+     * Start a password reset — emails a 6-digit code. Always 200 with a generic
+     * body so it cannot be used to tell which emails are registered.
+     */
+    @Post('forgot-password')
+    @HttpCode(200)
+    @Throttle(5, 900) // 5 reset requests / 15 min per IP
+    forgotPassword(@Body() dto: ForgotPasswordDto) {
+        return this.authService.forgotPassword(dto);
+    }
+
+    /** Complete a password reset with the emailed code + a new password. */
+    @Post('reset-password')
+    @HttpCode(200)
+    @Throttle(10, 900) // 10 code attempts / 15 min per IP
+    resetPassword(@Body() dto: ResetPasswordDto) {
+        return this.authService.resetPassword(dto);
     }
 
     /**

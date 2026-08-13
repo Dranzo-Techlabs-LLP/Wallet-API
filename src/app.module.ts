@@ -19,6 +19,7 @@ import { RefundRequest } from './refunds/refund-request.entity';
 import { RefundsModule } from './refunds/refunds.module';
 import { MatrixModule } from './matrix/matrix.module';
 import { AuthModule } from './auth/auth.module';
+import { PasswordReset } from './auth/password-reset.entity';
 
 @Module({
     imports: [
@@ -44,7 +45,7 @@ import { AuthModule } from './auth/auth.module';
                 username: configService.get<string>('DB_USER'),
                 password: configService.get<string>('DB_PASSWORD'),
                 database: configService.get<string>('DB_NAME'),
-                entities: [User, Expert, BankDetail, Session, Transaction, PendingHold, RefundRequest],
+                entities: [User, Expert, BankDetail, Session, Transaction, PendingHold, RefundRequest, PasswordReset],
                 synchronize: false,
                 logging: true,
                 // Pooled connections to a REMOTE MySQL die silently when idle -
