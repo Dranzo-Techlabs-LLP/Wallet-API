@@ -10,6 +10,13 @@ async function bootstrap() {
         // we can validate the Razorpay webhook HMAC against the original payload.
         // (JSON.stringify(req.body) re-serializes and will not match Razorpay's signature.)
         const app = await NestFactory.create(AppModule, { rawBody: true });
+
+        // Behind the cPanel/Apache reverse proxy every request arrives from 127.0.0.1,
+        // so without this the ThrottlerGuard keys rate limits on the proxy's IP and
+        // rate-limits EVERY user as one shared bucket (spurious 429s). Trusting the
+        // first proxy hop makes req.ip reflect the real client via X-Forwarded-For.
+        app.getHttpAdapter().getInstance().set('trust proxy', 1);
+
         app.useGlobalFilters(new AllExceptionsFilter());
         app.useGlobalPipes(new ValidationPipe({
             whitelist: true,
