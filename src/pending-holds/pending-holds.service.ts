@@ -75,11 +75,15 @@ export class PendingHoldsService {
             let savedHold: PendingHold;
 
             if (existingHold) {
-                // Update existing: set isActive to 1
+                // Update existing: set isActive to 1.
+                // Do NOT overwrite amount to the current rate: reuse performs NO new balance
+                // deduction, so the stored amount must stay equal to what was actually debited
+                // when the hold was created. Overwriting it (e.g. after the consultant changed
+                // max_credits) would make a later refund credit an amount that was never taken,
+                // breaking money conservation.
                 existingHold.isActive = 1;
-                existingHold.amount = holdAmount; // Update amount if consultant rate changed
                 savedHold = await queryRunner.manager.save(PendingHold, existingHold);
-                this.logger.log(`Updated existing hold (isActive=1): ${holdAmount} from ${dto.clientId} to ${dto.consultantId}. No balance deduction.`);
+                this.logger.log(`Reused existing hold (isActive=1): amount ${existingHold.amount} from ${dto.clientId} to ${dto.consultantId}. No balance deduction.`);
             } else {
                 // Insufficient-balance guard: a client cannot start a chat hold they cannot afford.
                 // Without this, current_hold could go negative — observed in testing.
@@ -179,6 +183,7 @@ export class PendingHoldsService {
         refund_status: string,
         clientId: string | null,
         consultantId: string | null,
+        amount: number | null,
         refundRequestId: number | null,
         pendingAutoApprovalNotification: {
             refundRequestId: number;
@@ -205,6 +210,7 @@ export class PendingHoldsService {
                 refund_status: 'none',
                 clientId: null,
                 consultantId: null,
+                amount: null,
                 refundRequestId: null,
                 pendingAutoApprovalNotification,
             };
@@ -225,6 +231,7 @@ export class PendingHoldsService {
             refund_status: hold.refund_status,
             clientId: hold.clientId,
             consultantId: hold.consultandId,
+            amount: Number(hold.amount),
             refundRequestId,
             pendingAutoApprovalNotification,
         };

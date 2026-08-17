@@ -11,9 +11,19 @@ export class RefundsController {
     }
 
     @Post('approve')
-    approveRefund(@Body() body: { refundRequestId: string; pendingHoldId: string }) {
+    approveRefund(@Body() body: { refundRequestId: string; pendingHoldId: string; refundAmount?: string | number }) {
         // isAutomatic defaults to false on the public endpoint — only the cron passes true.
-        return this.refundsService.approveRefund(parseInt(body.refundRequestId, 10), parseInt(body.pendingHoldId, 10));
+        // refundAmount (optional) makes this a PARTIAL refund: only that amount is returned to
+        // the client and the consultant keeps the rest. Omitted/blank => full refund.
+        const refundAmount = body.refundAmount != null && `${body.refundAmount}`.trim() !== ''
+            ? Number(body.refundAmount)
+            : undefined;
+        return this.refundsService.approveRefund(
+            parseInt(body.refundRequestId, 10),
+            parseInt(body.pendingHoldId, 10),
+            false,
+            refundAmount,
+        );
     }
 
     @Post('reject')

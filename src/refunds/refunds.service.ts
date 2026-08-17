@@ -5,6 +5,9 @@ import { RefundRequest } from './refund-request.entity';
 import { PendingHold } from '../pending-holds/pending-hold.entity';
 import { User } from '../users/user.entity';
 
+/** Round to 2 decimal places (INR paise) so partial-refund arithmetic never drifts. */
+const round2 = (n: number): number => Math.round(n * 100) / 100;
+
 @Injectable()
 export class RefundsService implements OnApplicationBootstrap {
     private readonly logger = new Logger(RefundsService.name);
@@ -117,7 +120,7 @@ export class RefundsService implements OnApplicationBootstrap {
     // MessagesPresenter has already sent a Matrix message inline, so push notifications
     // are taken care of) from cron auto-approval after 24h (no app open at the moment,
     // so we leave `notification_sent=0` so the apps can claim+announce on next poll).
-    async approveRefund(refundRequestId: number, pendingHoldId: number, isAutomatic: boolean = false) {
+    async approveRefund(refundRequestId: number, pendingHoldId: number, isAutomatic: boolean = false, refundAmount?: number) {
         const queryRunner = this.connection.createQueryRunner();
         await queryRunner.connect();
         await queryRunner.startTransaction();
@@ -131,10 +134,15 @@ export class RefundsService implements OnApplicationBootstrap {
                 throw new NotFoundException('Refund request not found');
             }
 
-            // Idempotency: refundRequest is the durable audit record. The pending_hold row is
-            // deleted on approval, so we can't rely on it for the double-approve guard anymore.
-            if (refundRequest.status === 'approved') {
-                throw new BadRequestException('Already approved');
+            // State guard: only a request still awaiting a decision may be approved. refundRequest
+            // is the durable audit record (the pending_hold row is deleted on approval, so we can't
+            // rely on it). Guarding only against 'approved' let a *rejected* request be re-approved,
+            // which would pay the client and rob the consultant of funds the cron owes them at the
+            // 24h mark — so reject anything not in the 'requested' state.
+            if (refundRequest.status !== 'requested') {
+                throw new BadRequestException(
+                    `Refund is not awaiting a decision (current status: ${refundRequest.status}).`,
+                );
             }
 
             const hold = await queryRunner.manager.findOne(PendingHold, {
@@ -146,7 +154,29 @@ export class RefundsService implements OnApplicationBootstrap {
                 throw new NotFoundException('Pending hold not found');
             }
 
-            // Refund: add hold.amount back to client.current_hold
+            const held = round2(Number(hold.amount));
+
+            // How much goes back to the client?
+            //  - The auto-approval cron (isAutomatic) always does a FULL refund: there is no
+            //    consultant present to choose a partial.
+            //  - A manual approve may pass refundAmount for a PARTIAL refund. The remainder
+            //    (held - toClient) is credited to the consultant immediately (they keep it),
+            //    and the session closes.
+            let toClient: number;
+            if (isAutomatic || refundAmount == null) {
+                toClient = held;
+            } else {
+                const requested = round2(Number(refundAmount));
+                if (!Number.isFinite(requested) || requested <= 0 || requested > held) {
+                    throw new BadRequestException(
+                        `Refund amount must be greater than 0 and at most the held amount (${held}).`,
+                    );
+                }
+                toClient = requested;
+            }
+            const toConsultant = round2(held - toClient);
+
+            // Refund toClient back to client.current_hold
             const client = await queryRunner.manager.findOne(User, {
                 where: { Webuddy_name: hold.clientId },
                 lock: { mode: 'pessimistic_write' },
@@ -154,30 +184,64 @@ export class RefundsService implements OnApplicationBootstrap {
             if (!client) {
                 throw new NotFoundException(`Client ${hold.clientId} not found`);
             }
-            client.current_hold = Number(client.current_hold) + Number(hold.amount);
+            client.current_hold = round2(Number(client.current_hold) + toClient);
             await queryRunner.manager.save(User, client);
 
-            // Ledger: client CREDIT entry for the refund.
+            // Ledger: client CREDIT entry for the (possibly partial) refund.
             await queryRunner.manager.query(
                 `INSERT INTO wallet_transactions (user_id, amount, currency, txn_type, source, status, provider) VALUES (?, ?, 'INR', 'CREDIT', 'REFUND', 'PAID', 'SYSTEM')`,
-                [client.id, Number(hold.amount)]
+                [client.id, toClient],
             );
 
+            // Partial refund: the consultant keeps the remainder, credited immediately.
+            if (toConsultant > 0) {
+                const consultant = await queryRunner.manager.findOne(User, {
+                    where: { Webuddy_name: hold.consultandId },
+                    lock: { mode: 'pessimistic_write' },
+                });
+                if (consultant) {
+                    consultant.current_hold = round2(Number(consultant.current_hold) + toConsultant);
+                    await queryRunner.manager.save(User, consultant);
+                    await queryRunner.manager.query(
+                        `INSERT INTO wallet_transactions (user_id, amount, currency, txn_type, source, status, provider) VALUES (?, ?, 'INR', 'CREDIT', 'HOLD_SETTLED', 'PAID', 'SYSTEM')`,
+                        [consultant.id, toConsultant],
+                    );
+                } else {
+                    // Do NOT fall through: committing here would credit the client, delete the hold,
+                    // and silently vaporise the consultant's remainder with no ledger row and no
+                    // recovery path. Throw so the whole transaction rolls back for investigation.
+                    throw new NotFoundException(
+                        `Consultant ${hold.consultandId} not found for the partial-refund remainder ` +
+                        `on hold ${hold.id}; rolling back so ${toConsultant} is not lost.`,
+                    );
+                }
+            }
+
             refundRequest.status = 'approved';
+            // Persist the amount actually refunded to the client so the in-room / push
+            // notification (findPendingAutoApprovalForPair reads refund_requests.amount)
+            // shows the true figure for a partial refund.
+            refundRequest.amount = toClient;
             // Manual approval = 1 (consultant's app already sends Matrix message inline).
             // Auto approval = 0 (no live app context, leave for apps to claim+announce).
             refundRequest.notification_sent = isAutomatic ? 0 : 1;
             await queryRunner.manager.save(RefundRequest, refundRequest);
 
-            // Hold is fully consumed: client got their funds back. Delete the row so a future chat
-            // with the same consultant correctly creates a fresh hold (and debits credits) instead of
-            // reusing this dead row in PendingHoldsService.initiateHold. The refund_request row
-            // preserves the audit trail.
+            // Hold is fully consumed: client got their (partial) refund and the consultant got the
+            // rest. Delete the row so a future chat with the same consultant creates a fresh hold
+            // (and debits credits) instead of reusing this dead row. refund_request preserves audit.
             await queryRunner.manager.delete(PendingHold, hold.id);
 
             await queryRunner.commitTransaction();
 
-            return { message: 'Refund approved and amount returned to client', amount: Number(hold.amount), isAutomatic };
+            return {
+                message: toConsultant > 0
+                    ? `Partial refund approved: ${toClient} returned to the client, ${toConsultant} kept by the consultant`
+                    : 'Refund approved and amount returned to client',
+                amount: toClient,
+                toConsultant,
+                isAutomatic,
+            };
         } catch (error) {
             await queryRunner.rollbackTransaction();
             this.logger.error(`Failed to approve refund: ${error.message}`);
