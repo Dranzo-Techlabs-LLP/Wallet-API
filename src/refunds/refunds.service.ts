@@ -160,8 +160,9 @@ export class RefundsService implements OnApplicationBootstrap {
             //  - The auto-approval cron (isAutomatic) always does a FULL refund: there is no
             //    consultant present to choose a partial.
             //  - A manual approve may pass refundAmount for a PARTIAL refund. The remainder
-            //    (held - toClient) is credited to the consultant immediately (they keep it),
-            //    and the session closes.
+            //    (held - toClient) is NOT paid to the consultant now — it stays parked in the hold
+            //    so the normal 24h settlement cron credits the consultant at the session's 24h mark
+            //    (a HOLD_SETTLED transaction), exactly like an un-refunded hold.
             let toClient: number;
             if (isAutomatic || refundAmount == null) {
                 toClient = held;
@@ -193,30 +194,6 @@ export class RefundsService implements OnApplicationBootstrap {
                 [client.id, toClient],
             );
 
-            // Partial refund: the consultant keeps the remainder, credited immediately.
-            if (toConsultant > 0) {
-                const consultant = await queryRunner.manager.findOne(User, {
-                    where: { Webuddy_name: hold.consultandId },
-                    lock: { mode: 'pessimistic_write' },
-                });
-                if (consultant) {
-                    consultant.current_hold = round2(Number(consultant.current_hold) + toConsultant);
-                    await queryRunner.manager.save(User, consultant);
-                    await queryRunner.manager.query(
-                        `INSERT INTO wallet_transactions (user_id, amount, currency, txn_type, source, status, provider) VALUES (?, ?, 'INR', 'CREDIT', 'HOLD_SETTLED', 'PAID', 'SYSTEM')`,
-                        [consultant.id, toConsultant],
-                    );
-                } else {
-                    // Do NOT fall through: committing here would credit the client, delete the hold,
-                    // and silently vaporise the consultant's remainder with no ledger row and no
-                    // recovery path. Throw so the whole transaction rolls back for investigation.
-                    throw new NotFoundException(
-                        `Consultant ${hold.consultandId} not found for the partial-refund remainder ` +
-                        `on hold ${hold.id}; rolling back so ${toConsultant} is not lost.`,
-                    );
-                }
-            }
-
             refundRequest.status = 'approved';
             // Persist the amount actually refunded to the client so the in-room / push
             // notification (findPendingAutoApprovalForPair reads refund_requests.amount)
@@ -227,16 +204,33 @@ export class RefundsService implements OnApplicationBootstrap {
             refundRequest.notification_sent = isAutomatic ? 0 : 1;
             await queryRunner.manager.save(RefundRequest, refundRequest);
 
-            // Hold is fully consumed: client got their (partial) refund and the consultant got the
-            // rest. Delete the row so a future chat with the same consultant creates a fresh hold
-            // (and debits credits) instead of reusing this dead row. refund_request preserves audit.
-            await queryRunner.manager.delete(PendingHold, hold.id);
+            if (toConsultant > 0) {
+                // PARTIAL refund: do NOT pay the consultant now. Park the remainder in the hold so
+                // the normal 24h settlement cron credits the consultant (a HOLD_SETTLED
+                // wallet_transaction) at the session's 24h mark — identical to an un-refunded hold,
+                // so the consultant sees the same hold-then-settle flow in their transactions.
+                //   amount          -> the remainder still owed to the consultant
+                //   refund_status   -> 'none' so the cron routes it to pay-consultant
+                //   isRefundActive  -> 0: refund resolved; also blocks re-refunding the remainder
+                //   isActive        -> 0: the session is closed
+                // createdAt is left untouched, so the 24h window still runs from the original hold.
+                hold.amount = toConsultant;
+                hold.refund_status = 'none';
+                hold.isRefundActive = 0;
+                hold.isActive = 0;
+                await queryRunner.manager.save(PendingHold, hold);
+            } else {
+                // FULL refund: the client got everything back; nothing is owed to the consultant.
+                // Delete the hold so a future chat creates a fresh one instead of reusing this dead
+                // row. refund_request preserves the audit trail.
+                await queryRunner.manager.delete(PendingHold, hold.id);
+            }
 
             await queryRunner.commitTransaction();
 
             return {
                 message: toConsultant > 0
-                    ? `Partial refund approved: ${toClient} returned to the client, ${toConsultant} kept by the consultant`
+                    ? `Partial refund approved: ${toClient} returned to the client; ${toConsultant} stays in hold and settles to the consultant at the 24h mark`
                     : 'Refund approved and amount returned to client',
                 amount: toClient,
                 toConsultant,
