@@ -157,15 +157,20 @@ export class PendingHoldsService {
     }
 
     async exists(clientId: string, consultantId: string): Promise<{ exists: boolean }> {
-        // Only treat a hold as "existing" if it is currently active OR has an open refund.
-        // Counting every historical hold caused stale 'true' responses for chats whose
-        // hold was already refunded/closed, which made the Android client skip the
-        // initiateHold call and rely on a phantom hold.
+        // The chat is "covered" EXACTLY when a new message would NOT create a new charge — i.e.
+        // when initiateHold would REUSE the existing row: same pair, less than 24h old, and not
+        // fully refunded. This must mirror initiateHold's reuse condition; the previous
+        // isActive/isRefundActive flag check disagreed with it (e.g. a fresh hold whose refund was
+        // rejected, or a partial-refund remainder, both have those flags at 0 yet still cover the
+        // window), which made the app show "Chat restricted — recharge" to clients who had paid.
+        const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
         const count = await this.pendingHoldRepository.count({
-            where: [
-                { clientId, consultandId: consultantId, isActive: 1 },
-                { clientId, consultandId: consultantId, isRefundActive: 1 },
-            ]
+            where: {
+                clientId,
+                consultandId: consultantId,
+                createdAt: MoreThan(twentyFourHoursAgo),
+                refund_status: Not('approved'),
+            },
         });
         return { exists: count > 0 };
     }
