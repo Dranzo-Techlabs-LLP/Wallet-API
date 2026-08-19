@@ -22,6 +22,7 @@ import { AuthModule } from './auth/auth.module';
 import { PasswordReset } from './auth/password-reset.entity';
 import { CallIntent } from './calls/call-intent.entity';
 import { CallsModule } from './calls/calls.module';
+import { DbIndexesService } from './common/db-indexes.service';
 
 @Module({
     imports: [
@@ -49,7 +50,10 @@ import { CallsModule } from './calls/calls.module';
                 database: configService.get<string>('DB_NAME'),
                 entities: [User, Expert, BankDetail, Session, Transaction, PendingHold, RefundRequest, PasswordReset, CallIntent],
                 synchronize: false,
-                logging: true,
+                // Log only problems. `logging: true` wrote EVERY query (with full column lists)
+                // synchronously to the PM2 log on every request — measurable latency on hot
+                // endpoints (balance, hold-status polling, auth) and runaway log files.
+                logging: ['error', 'warn'],
                 // Pooled connections to a REMOTE MySQL die silently when idle -
                 // a NAT/firewall drops the flow (and locally, the SSH tunnel does
                 // the same). Without keepalive the next query fails with an
@@ -73,6 +77,6 @@ import { CallsModule } from './calls/calls.module';
         CallsModule,
     ],
     controllers: [],
-    providers: [],
+    providers: [DbIndexesService],
 })
 export class AppModule { }
