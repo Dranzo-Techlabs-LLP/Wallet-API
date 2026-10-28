@@ -37,6 +37,8 @@ import { MailService } from './mail.service';
     ],
     controllers: [AuthController],
     providers: [AuthService, JwtAuthGuard, GoogleTokenVerifier, MailService],
-    exports: [AuthService, JwtAuthGuard],
+    // JwtModule too: a guard named in another module's @UseGuards is built in
+    // THAT module, so it needs JwtService there.
+    exports: [AuthService, JwtAuthGuard, JwtModule],
 })
 export class AuthModule { }
