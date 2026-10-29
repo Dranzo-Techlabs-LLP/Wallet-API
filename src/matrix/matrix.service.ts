@@ -463,6 +463,27 @@ export class MatrixService {
     }
 
     /**
+     * The Matrix user an access token belongs to, or null when the homeserver
+     * rejects the token. Lets the app authorise wallet calls with the session it
+     * already holds, since it does not keep the Clariva JWT across restarts.
+     */
+    async whoAmI(accessToken: string): Promise<string | null> {
+        if (!this.homeserverUrl) {
+            throw new InternalServerErrorException('MATRIX_HOMESERVER_URL is not configured');
+        }
+        const res = await this.call('GET', '/_matrix/client/v3/account/whoami', undefined, {
+            Authorization: `Bearer ${accessToken}`,
+        });
+        if (res.status === 200 && typeof res.body?.user_id === 'string') {
+            return res.body.user_id;
+        }
+        if (res.status === 401 || res.status === 403) {
+            return null;
+        }
+        throw new InternalServerErrorException(`Matrix whoami failed: HTTP ${res.status}`);
+    }
+
+    /**
      * Deactivate a Matrix account via the Synapse admin API.
      *
      * Used instead of the client-side deactivate endpoint because that requires

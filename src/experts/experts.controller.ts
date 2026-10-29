@@ -2,32 +2,38 @@ import { Controller, Post, Get, Body, Param, Req, UseGuards } from '@nestjs/comm
 import { ExpertsService } from './experts.service';
 import { AddBankDetailDto } from './dto/add-bank-detail.dto';
 import { AddMyBankDetailDto } from './dto/add-my-bank-detail.dto';
-import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { ClarivaUserGuard } from '../auth/clariva-user.guard';
 
+/**
+ * Every route needs a Bearer token (Clariva JWT or the app's Matrix access
+ * token) and only ever touches the CALLER's own expert record.
+ */
 @Controller('v1/experts')
+@UseGuards(ClarivaUserGuard)
 export class ExpertsController {
     constructor(private readonly expertsService: ExpertsService) { }
 
+    /** Legacy: addressed by the expert's UUID, which must belong to the caller. */
     @Post('bank-details')
-    addBankDetail(@Body() dto: AddBankDetailDto) {
-        return this.expertsService.addBankDetail(dto);
+    addBankDetail(@Req() req: any, @Body() dto: AddBankDetailDto) {
+        return this.expertsService.addBankDetail(dto, req.user.id);
     }
 
-    /**
-     * Save the caller's own payout bank account.
-     *
-     * Authorised by the Clariva JWT, so a caller can only ever set their OWN
-     * account - unlike POST bank-details, which trusts the expertId in the body.
-     * Consultant sign-up uses this, as it holds a fresh token.
-     */
+    /** Save the caller's payout bank account (sign-up and Settings > Bank Details). */
     @Post('me/bank-details')
-    @UseGuards(JwtAuthGuard)
     addMyBankDetail(@Req() req: any, @Body() dto: AddMyBankDetailDto) {
         return this.expertsService.addBankDetailForUser(req.user.id, dto);
     }
 
+    /** The caller's active payout account, masked; `bankDetail` is null when none is saved. */
+    @Get('me/bank-details')
+    getMyBankDetail(@Req() req: any) {
+        return this.expertsService.getActiveBankDetailForUser(req.user.id);
+    }
+
+    /** Legacy: the caller's own bank details by expert UUID. Declared after me/ so "me" is never taken as an ID. */
     @Get(':expertId/bank-details')
-    getBankDetails(@Param('expertId') expertId: string) {
-        return this.expertsService.getBankDetails(expertId);
+    getBankDetails(@Req() req: any, @Param('expertId') expertId: string) {
+        return this.expertsService.getBankDetails(expertId, req.user.id);
     }
 }
