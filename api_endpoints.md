@@ -1,6 +1,6 @@
 # WeBuddy Wallet API Endpoints
 
-Base URL: `https://wallet.dranzo.com`
+Base URL: `https://wallet.clarivahub.com`
 
 ---
 
