@@ -163,6 +163,8 @@ export class RefundsService implements OnApplicationBootstrap {
             //    (held - toClient) is NOT paid to the consultant now — it stays parked in the hold
             //    so the normal 24h settlement cron credits the consultant at the session's 24h mark
             //    (a HOLD_SETTLED transaction), exactly like an un-refunded hold.
+            //    A partial amount must be LESS than the held amount; the full amount itself (sent
+            //    by app versions that allowed it) is simply a full refund.
             let toClient: number;
             if (isAutomatic || refundAmount == null) {
                 toClient = held;
@@ -170,7 +172,7 @@ export class RefundsService implements OnApplicationBootstrap {
                 const requested = round2(Number(refundAmount));
                 if (!Number.isFinite(requested) || requested <= 0 || requested > held) {
                     throw new BadRequestException(
-                        `Refund amount must be greater than 0 and at most the held amount (${held}).`,
+                        `A partial refund must be greater than 0 and less than the full amount (${held}).`,
                     );
                 }
                 toClient = requested;

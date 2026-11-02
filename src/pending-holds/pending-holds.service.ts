@@ -1,6 +1,6 @@
 import { Injectable, Logger, NotFoundException, ForbiddenException, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, Connection, MoreThan, Not } from 'typeorm';
+import { Repository, Connection, MoreThan, Not, In, IsNull } from 'typeorm';
 import { PendingHold } from './pending-hold.entity';
 import { User } from '../users/user.entity';
 import { RefundRequest } from '../refunds/refund-request.entity';
@@ -56,19 +56,11 @@ export class PendingHoldsService {
                 throw new ForbiddenException(`Consultants cannot initiate a chat hold`);
             }
 
-            // 3. Check for an existing LIVE hold within 24 hours.
-            // 'approved' rows are deleted in RefundsService.approveRefund, so we shouldn't see them
-            // here — but exclude them defensively in case a stale row survives from before that fix.
-            // We DO reuse 'rejected' rows: the consultant denied the refund and the cron will pay
-            // them at the 24h mark; the user owes for that prior chat, so a new chat shares it.
-            const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+            // 3. Check for a hold that still covers this chat (see liveHoldWhere): reusing it
+            // charges nothing. A session whose refund completed - fully or partially - no longer
+            // covers the chat, so the next message starts a new, charged session.
             const existingHold = await queryRunner.manager.findOne(PendingHold, {
-                where: {
-                    clientId: dto.clientId,
-                    consultandId: dto.consultantId,
-                    createdAt: MoreThan(twentyFourHoursAgo),
-                    refund_status: Not('approved'),
-                },
+                where: PendingHoldsService.liveHoldWhere(dto.clientId, dto.consultantId),
                 order: { createdAt: 'DESC' }
             });
 
@@ -158,21 +150,36 @@ export class PendingHoldsService {
 
     async exists(clientId: string, consultantId: string): Promise<{ exists: boolean }> {
         // The chat is "covered" EXACTLY when a new message would NOT create a new charge — i.e.
-        // when initiateHold would REUSE the existing row: same pair, less than 24h old, and not
-        // fully refunded. This must mirror initiateHold's reuse condition; the previous
-        // isActive/isRefundActive flag check disagreed with it (e.g. a fresh hold whose refund was
-        // rejected, or a partial-refund remainder, both have those flags at 0 yet still cover the
-        // window), which made the app show "Chat restricted — recharge" to clients who had paid.
-        const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        // when initiateHold would REUSE an existing row. Both use liveHoldWhere so they cannot
+        // disagree (when they did, the app showed "Chat restricted — recharge" to paid clients, or
+        // skipped the "new session" warning before a charge).
         const count = await this.pendingHoldRepository.count({
-            where: {
-                clientId,
-                consultandId: consultantId,
-                createdAt: MoreThan(twentyFourHoursAgo),
-                refund_status: Not('approved'),
-            },
+            where: PendingHoldsService.liveHoldWhere(clientId, consultantId),
         });
         return { exists: count > 0 };
+    }
+
+    /**
+     * Holds that still cover a chat, so a new message reuses them instead of charging: same pair,
+     * under 24h old, and the session not closed. A session closes when its refund completes:
+     *  - full refund: the row is deleted (RefundsService.approveRefund);
+     *  - partial refund: the row stays only to pay the consultant their remainder at the 24h mark,
+     *    marked refund_status 'none' with isRefundActive 0 - a state nothing else produces (a fresh
+     *    hold has isRefundActive 1, a rejected one has refund_status 'rejected').
+     * A refund still awaiting a decision ('requested') or a rejected one keeps covering the chat:
+     * the client has paid for that session.
+     */
+    static liveHoldWhere(clientId: string, consultantId: string) {
+        const base = {
+            clientId,
+            consultandId: consultantId,
+            createdAt: MoreThan(new Date(Date.now() - 24 * 60 * 60 * 1000)),
+        };
+        return [
+            { ...base, refund_status: In(['requested', 'rejected']) },
+            { ...base, refund_status: 'none', isRefundActive: Not(0) },
+            { ...base, refund_status: 'none', isRefundActive: IsNull() },
+        ];
     }
 
     // Bidirectional lookup: returns the active hold between two users regardless of who is the
