@@ -69,8 +69,11 @@ export class RefundsService implements OnApplicationBootstrap {
         await queryRunner.startTransaction();
 
         try {
+            // Locked, like every refund and settlement step on this hold, so a request can't slip in
+            // while the hold is being settled or decided (or be filed twice by a double tap).
             const hold = await queryRunner.manager.findOne(PendingHold, {
-                where: { id: pendingHoldId, consultandId: consultantId, clientId } // 'consultandId' = entity property mapped to DB column 'consultandId'
+                where: { id: pendingHoldId, consultandId: consultantId, clientId }, // 'consultandId' = entity property mapped to DB column 'consultandId'
+                lock: { mode: 'pessimistic_write' },
             });
 
             if (!hold) {
@@ -126,8 +129,15 @@ export class RefundsService implements OnApplicationBootstrap {
         await queryRunner.startTransaction();
 
         try {
+            // Lock the request row FIRST - before any other read - so two decisions on the same
+            // request (two approvals, approve vs reject, the consultant vs the auto-approval cron)
+            // run one after the other and the guard below sees the outcome of the first. MySQL's
+            // REPEATABLE READ fixes a transaction's snapshot at its first plain read, so with a plain
+            // read here a second approval passed the guard on stale data and refunded the session
+            // again (for a partial refund: the remainder owed to the consultant).
             const refundRequest = await queryRunner.manager.findOne(RefundRequest, {
-                where: { id: refundRequestId, pendingHoldId }
+                where: { id: refundRequestId, pendingHoldId },
+                lock: { mode: 'pessimistic_write' },
             });
 
             if (!refundRequest) {
@@ -152,6 +162,15 @@ export class RefundsService implements OnApplicationBootstrap {
 
             if (!hold) {
                 throw new NotFoundException('Pending hold not found');
+            }
+
+            // The hold must still be waiting on this decision too. Otherwise its refund was already
+            // settled through another request row (e.g. a duplicate from a double-tapped request),
+            // and approving would refund it - or a partial refund's remainder - a second time.
+            if (hold.refund_status !== 'requested') {
+                throw new BadRequestException(
+                    `The session's refund is not awaiting a decision (current status: ${hold.refund_status}).`,
+                );
             }
 
             const held = round2(Number(hold.amount));
@@ -283,16 +302,27 @@ export class RefundsService implements OnApplicationBootstrap {
         await queryRunner.startTransaction();
 
         try {
+            // Locked first, like approveRefund, so a reject and an approval of the same request
+            // can't both apply: the approval's refund standing under a 'rejected' record, or a
+            // just-rejected request still being refunded.
             const refundRequest = await queryRunner.manager.findOne(RefundRequest, {
-                where: { id: refundRequestId }
+                where: { id: refundRequestId },
+                lock: { mode: 'pessimistic_write' },
             });
 
             if (!refundRequest) {
                 throw new NotFoundException('Refund request not found');
             }
 
+            if (refundRequest.status !== 'requested') {
+                throw new BadRequestException(
+                    `Refund is not awaiting a decision (current status: ${refundRequest.status}).`,
+                );
+            }
+
             const hold = await queryRunner.manager.findOne(PendingHold, {
-                where: { id: refundRequest.pendingHoldId }
+                where: { id: refundRequest.pendingHoldId },
+                lock: { mode: 'pessimistic_write' },
             });
 
             if (!hold) {

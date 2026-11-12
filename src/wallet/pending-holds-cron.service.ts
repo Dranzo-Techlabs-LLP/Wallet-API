@@ -85,14 +85,12 @@ export class PendingHoldsCronService {
     }
 
     private async settle(record: PendingHold) {
-        const status = record.refund_status ?? 'none';
-
         // 'requested' is special: the 24h response window is measured from RefundRequest.createdAt,
         // NOT from PendingHold.createdAt. Otherwise a client who requests a refund 23h into a hold
         // would only give the consultant 1h to respond. Delegate the actual refund-approval work
         // to RefundsService.approveRefund, which already handles crediting the client, deleting the
         // hold, marking the request as 'approved', and the per-record DB transaction.
-        if (status === 'requested') {
+        if ((record.refund_status ?? 'none') === 'requested') {
             await this.maybeAutoApproveRefund(record);
             return;
         }
@@ -102,6 +100,21 @@ export class PendingHoldsCronService {
         await queryRunner.startTransaction();
 
         try {
+            // Re-read the hold under a lock: it was listed before this transaction, and the refund
+            // flows lock the same row. Since the listing it may have been refunded (row deleted),
+            // shrunk to a partial refund's remainder, or put up for a refund - settling the stale
+            // copy could pay the consultant money the client just got back.
+            const hold = await queryRunner.manager.findOne(PendingHold, {
+                where: { id: record.id },
+                lock: { mode: 'pessimistic_write' },
+            });
+            const status = hold?.refund_status ?? 'none';
+            if (!hold || status === 'requested') {
+                this.logger.log(`Hold ${record.id} changed since it was listed (${hold ? 'refund requested' : 'already settled'}); skipping.`);
+                await queryRunner.rollbackTransaction();
+                return;
+            }
+
             // For non-'requested' statuses the settlement target depends on refund_status:
             // 'approved'  → already settled by RefundsService.approveRefund. Cron just cleans up.
             // 'none' / 'rejected' → consultant receives the funds (default / post-rejection).
@@ -113,7 +126,7 @@ export class PendingHoldsCronService {
                 action = 'cleanup';
             } else {
                 // 'none' or 'rejected'
-                targetWebuddyName = (record as any).consultandId ?? (record as any).consultantId;
+                targetWebuddyName = (hold as any).consultandId ?? (hold as any).consultantId;
                 action = 'pay-consultant';
             }
 
@@ -123,25 +136,25 @@ export class PendingHoldsCronService {
                     lock: { mode: 'pessimistic_write' },
                 });
                 if (user) {
-                    user.current_hold = Number(user.current_hold) + Number(record.amount);
+                    user.current_hold = Number(user.current_hold) + Number(hold.amount);
                     await queryRunner.manager.save(User, user);
                     // Ledger: CREDIT entry for the settlement. 'pay-consultant' = default 24h
                     // settlement (or post-rejection) crediting the consultant.
                     await queryRunner.manager.query(
                         `INSERT INTO wallet_transactions (user_id, amount, currency, txn_type, source, status, provider) VALUES (?, ?, 'INR', 'CREDIT', 'HOLD_SETTLED', 'PAID', 'SYSTEM')`,
-                        [user.id, Number(record.amount)]
+                        [user.id, Number(hold.amount)]
                     );
                     this.logger.log(
-                        `Hold ${record.id} settled (${action}). Credited ${record.amount} to ${user.Webuddy_name}. refund_status=${status}.`
+                        `Hold ${hold.id} settled (${action}). Credited ${hold.amount} to ${user.Webuddy_name}. refund_status=${status}.`
                     );
                 } else {
-                    this.logger.warn(`User ${targetWebuddyName} not found for hold ${record.id}; deleting row.`);
+                    this.logger.warn(`User ${targetWebuddyName} not found for hold ${hold.id}; deleting row.`);
                 }
             } else {
-                this.logger.log(`Hold ${record.id} cleanup (status=${status}); already settled.`);
+                this.logger.log(`Hold ${hold.id} cleanup (status=${status}); already settled.`);
             }
 
-            await queryRunner.manager.delete(PendingHold, record.id);
+            await queryRunner.manager.delete(PendingHold, hold.id);
             await queryRunner.commitTransaction();
         } catch (err) {
             this.logger.error(`Error settling pending hold ${record.id}: ${err.message}`, err.stack);
