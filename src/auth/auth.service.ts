@@ -24,6 +24,8 @@ import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { MailService } from './mail.service';
 import { GoogleTokenVerifier } from './google-token-verifier';
+import { AppleTokenVerifier } from './apple-token-verifier';
+import { AppleLoginDto } from './dto/apple-login.dto';
 
 const scryptAsync: any = promisify(scrypt);
 
@@ -104,6 +106,7 @@ export class AuthService implements OnApplicationBootstrap {
         private readonly googleTokenVerifier: GoogleTokenVerifier,
         private readonly mailService: MailService,
         private readonly config: ConfigService,
+        private readonly appleTokenVerifier: AppleTokenVerifier,
     ) {
         this.resetCodePepper =
             this.config.get<string>('PASSWORD_RESET_SECRET') ||
@@ -250,6 +253,34 @@ export class AuthService implements OnApplicationBootstrap {
      */
     async loginWithGoogle(dto: GoogleLoginDto): Promise<AuthResult | GoogleRoleRequired> {
         const identity = await this.googleTokenVerifier.verify(dto.idToken);
+        return this.loginWithVerifiedIdentity(
+            { email: identity.email, name: identity.name, googleSub: identity.sub },
+            dto,
+        );
+    }
+
+    /**
+     * Sign in (or sign up) with Apple. Identical to Google sign-in: the identity
+     * token is verified server-side and accounts are matched on the VERIFIED
+     * email, so the same person can use email/password, Google or Apple. Apple
+     * gives the name to the device only once, so the client passes it on.
+     */
+    async loginWithApple(dto: AppleLoginDto): Promise<AuthResult | GoogleRoleRequired> {
+        const identity = await this.appleTokenVerifier.verify(dto.identityToken);
+        return this.loginWithVerifiedIdentity(
+            { email: identity.email, name: dto.name?.trim() || undefined },
+            dto,
+        );
+    }
+
+    /**
+     * The shared part of Google and Apple sign-in, run only after the provider's
+     * token was verified. `googleSub` is recorded for Google identities only.
+     */
+    private async loginWithVerifiedIdentity(
+        identity: { email: string; name?: string; googleSub?: string },
+        dto: { isConsultant?: number; mode?: 'signin' | 'signup' },
+    ): Promise<AuthResult | GoogleRoleRequired> {
         const email = this.normalizeEmail(identity.email);
 
         let user: User = await this.usersRepository.findOne({ where: { email } });
@@ -290,9 +321,9 @@ export class AuthService implements OnApplicationBootstrap {
         if (user) {
             // Record the Google link on first use, but never overwrite an existing
             // different subject - that would silently re-point an account.
-            if (!user.googleId) {
-                await this.usersRepository.update({ id: user.id }, { googleId: identity.sub });
-                user.googleId = identity.sub;
+            if (identity.googleSub && !user.googleId) {
+                await this.usersRepository.update({ id: user.id }, { googleId: identity.googleSub });
+                user.googleId = identity.googleSub;
             }
             // Backfill a role that was never set. Deliberately only when it is
             // currently unset: a Google sign-in must never silently flip the role
@@ -310,7 +341,7 @@ export class AuthService implements OnApplicationBootstrap {
 
             const entity = this.usersRepository.create({
                 email,
-                googleId: identity.sub,
+                googleId: identity.googleSub ?? null,
                 username: allocated?.username ?? null,
                 name: identity.name || email.split('@')[0],
                 passwordHash: null,
@@ -385,12 +416,16 @@ export class AuthService implements OnApplicationBootstrap {
             // "this is a Google account" apart from "no such account" and enumerate
             // accounts in bulk. The app always sends the token (it learned the
             // account type from getReauthMethod), so this path is only hit by misuse.
-            if (!dto.googleIdToken) {
+            // Accounts without a password signed up with Google or Apple; either
+            // provider's fresh token proves ownership if its verified email matches.
+            if (!dto.googleIdToken && !dto.appleIdToken) {
                 throw invalid();
             }
             let identity: { email: string };
             try {
-                identity = await this.googleTokenVerifier.verify(dto.googleIdToken);
+                identity = dto.appleIdToken
+                    ? await this.appleTokenVerifier.verify(dto.appleIdToken)
+                    : await this.googleTokenVerifier.verify(dto.googleIdToken);
             } catch {
                 throw invalid();
             }

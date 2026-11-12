@@ -9,6 +9,7 @@ import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
 import { JwtAuthGuard } from './jwt-auth.guard';
 import { GoogleTokenVerifier } from './google-token-verifier';
+import { AppleTokenVerifier } from './apple-token-verifier';
 import { MailService } from './mail.service';
 
 @Module({
@@ -36,7 +37,7 @@ import { MailService } from './mail.service';
         }),
     ],
     controllers: [AuthController],
-    providers: [AuthService, JwtAuthGuard, GoogleTokenVerifier, MailService],
+    providers: [AuthService, JwtAuthGuard, GoogleTokenVerifier, AppleTokenVerifier, MailService],
     // JwtModule too: a guard named in another module's @UseGuards is built in
     // THAT module, so it needs JwtService there.
     exports: [AuthService, JwtAuthGuard, JwtModule],
