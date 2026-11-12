@@ -30,18 +30,12 @@ export class PendingHoldsService {
         await queryRunner.startTransaction();
 
         try {
-            // 1. Fetch consultant's max_credits
-            const consultant = await queryRunner.manager.findOne(User, {
-                where: { Webuddy_name: dto.consultantId }
-            });
-
-            if (!consultant) {
-                throw new NotFoundException(`Consultant ${dto.consultantId} not found`);
-            }
-
-            const holdAmount = Number(consultant.max_credits);
-
-            // 2. Fetch client and deduct from current_hold
+            // 1. Lock the paying client's row FIRST - before any other read. Concurrent hold
+            // requests for this client queue here. MySQL's default REPEATABLE READ fixes a
+            // transaction's snapshot at its first plain (non-locking) read, so a plain read before
+            // this lock left a queued request reading data from before the request ahead of it
+            // committed: step 3 missed the hold that request had just created, and the client was
+            // charged twice. With the lock first, the snapshot starts after that commit.
             const client = await queryRunner.manager.findOne(User, {
                 where: { Webuddy_name: dto.clientId },
                 lock: { mode: 'pessimistic_write' }
@@ -55,6 +49,17 @@ export class PendingHoldsService {
             if (Number(client.isConsultant) === 1) {
                 throw new ForbiddenException(`Consultants cannot initiate a chat hold`);
             }
+
+            // 2. Fetch consultant's max_credits
+            const consultant = await queryRunner.manager.findOne(User, {
+                where: { Webuddy_name: dto.consultantId }
+            });
+
+            if (!consultant) {
+                throw new NotFoundException(`Consultant ${dto.consultantId} not found`);
+            }
+
+            const holdAmount = Number(consultant.max_credits);
 
             // 3. Check for a hold that still covers this chat (see liveHoldWhere): reusing it
             // charges nothing. A session whose refund completed - fully or partially - no longer

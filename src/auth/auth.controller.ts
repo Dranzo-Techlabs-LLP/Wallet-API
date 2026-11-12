@@ -4,6 +4,7 @@ import { AuthService } from './auth.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { GoogleLoginDto } from './dto/google-login.dto';
+import { AppleLoginDto } from './dto/apple-login.dto';
 import { DeactivateAccountDto } from './dto/deactivate-account.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
@@ -83,6 +84,17 @@ export class AuthController {
     @Throttle(20, 900) // 20 / 15 min - token verify, allows a few genuine retries
     google(@Body() dto: GoogleLoginDto) {
         return this.authService.loginWithGoogle(dto);
+    }
+
+    /**
+     * Sign in or sign up with Apple. The device sends an Apple identity token,
+     * verified server-side; responses are exactly as for Google.
+     */
+    @Post('apple')
+    @HttpCode(200)
+    @Throttle(20, 900) // 20 / 15 min - token verify, allows a few genuine retries
+    apple(@Body() dto: AppleLoginDto) {
+        return this.authService.loginWithApple(dto);
     }
 
     /**

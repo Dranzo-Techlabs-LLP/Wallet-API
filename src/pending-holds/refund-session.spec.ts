@@ -27,6 +27,8 @@ describe('Chat sessions and refunds', () => {
     let holds: PendingHoldsService;
     let refunds: RefundsService;
     let cron: PendingHoldsCronService;
+    /** The reads made through transactions' query runners, in order. */
+    let reads: { entity: any; where: any; lock?: string }[];
 
     const balance = async (who: string) =>
         Number((await connection.getRepository(User).findOne({ where: { Webuddy_name: who } })).current_hold);
@@ -58,12 +60,14 @@ describe('Chat sessions and refunds', () => {
             const [query, values] = escape(sql, params, native);
             return [query, values.map((v: any) => (v instanceof Date ? v.toISOString().replace('T', ' ').slice(0, 19) : v))];
         };
+        reads = [];
         const createQueryRunner = connection.createQueryRunner.bind(connection);
         (connection as any).createQueryRunner = (...args: any[]) => {
             const runner = createQueryRunner(...args);
             const findOne = runner.manager.findOne.bind(runner.manager);
             (runner.manager as any).findOne = (entity: any, options: any) => {
                 const { lock, ...rest } = options ?? {};
+                reads.push({ entity, where: rest.where, lock: lock?.mode });
                 return findOne(entity, rest);
             };
             return runner;
@@ -90,6 +94,16 @@ describe('Chat sessions and refunds', () => {
         expect(await balance(CLIENT)).toBe(400);
         expect(await liveHolds()).toHaveLength(1);
         expect(await covered()).toBe(true);
+    });
+
+    it('locks the paying client before reading anything else, so overlapping requests cannot both charge', async () => {
+        // SQLite runs one transaction at a time, so the race itself can't happen here. On MySQL a
+        // transaction's snapshot is fixed by its first plain read: anything read before the client
+        // row lock let a request queued on that lock miss the hold the request ahead of it had just
+        // created, and charge the client a second time.
+        reads.length = 0;
+        await start();
+        expect(reads[0]).toEqual({ entity: User, where: { Webuddy_name: CLIENT }, lock: 'pessimistic_write' });
     });
 
     it('starts a NEW charged session after a partial refund, while the remainder still pays the consultant', async () => {
@@ -153,5 +167,85 @@ describe('Chat sessions and refunds', () => {
         expect(await covered()).toBe(true);
         await start();
         expect(await balance(CLIENT)).toBe(400);
+    });
+
+    // Refunds and the 24h settlement must run one at a time per session. SQLite can't run them at
+    // the same time, so these check that each step locks before it reads (on MySQL a plain read
+    // first fixes a stale snapshot), and that each re-checks the state it finds.
+
+    it('locks before reading when requesting, deciding and settling a refund', async () => {
+        const first = await start();
+        reads.length = 0;
+        const { refundRequestId } = await refunds.requestRefund(CLIENT, CONSULTANT, first.id);
+        expect(reads[0]).toEqual({ entity: PendingHold, where: { id: first.id, consultandId: CONSULTANT, clientId: CLIENT }, lock: 'pessimistic_write' });
+
+        reads.length = 0;
+        await refunds.approveRefund(refundRequestId, first.id, false, 30);
+        expect(reads[0]).toEqual({ entity: RefundRequest, where: { id: refundRequestId, pendingHoldId: first.id }, lock: 'pessimistic_write' });
+
+        const second = await start();
+        const { refundRequestId: secondRequestId } = await refunds.requestRefund(CLIENT, CONSULTANT, second.id);
+        reads.length = 0;
+        await refunds.rejectRefund(secondRequestId);
+        expect(reads[0]).toEqual({ entity: RefundRequest, where: { id: secondRequestId }, lock: 'pessimistic_write' });
+
+        reads.length = 0;
+        await (cron as any).settle(await connection.getRepository(PendingHold).findOne(second.id));
+        expect(reads[0]).toEqual({ entity: PendingHold, where: { id: second.id }, lock: 'pessimistic_write' });
+    });
+
+    it('refuses to decide a refund that was already decided', async () => {
+        const first = await start();
+        const { refundRequestId } = await refunds.requestRefund(CLIENT, CONSULTANT, first.id);
+        await refunds.approveRefund(refundRequestId, first.id, false, 30);
+
+        await expect(refunds.approveRefund(refundRequestId, first.id, true)).rejects.toBeInstanceOf(BadRequestException);
+        await expect(refunds.rejectRefund(refundRequestId)).rejects.toBeInstanceOf(BadRequestException);
+        // Only the first decision applied: 30 back to the client, the 70 remainder still owed to the consultant.
+        expect(await balance(CLIENT)).toBe(430);
+        expect(Number((await liveHolds())[0].amount)).toBe(70);
+    });
+
+    it('does not refund a session twice through a duplicate refund request', async () => {
+        const first = await start();
+        const { refundRequestId } = await refunds.requestRefund(CLIENT, CONSULTANT, first.id);
+        // A second open request for the same session, as a double-tapped request could leave behind.
+        const requests = connection.getRepository(RefundRequest);
+        const duplicate = await requests.save(requests.create({
+            clientId: CLIENT, consultantId: CONSULTANT, pendingHoldId: first.id, amount: RATE, status: 'requested',
+        }));
+
+        await refunds.approveRefund(refundRequestId, first.id, false, 30);
+        await expect(refunds.approveRefund(duplicate.id, first.id, true)).rejects.toBeInstanceOf(BadRequestException);
+        expect(await balance(CLIENT)).toBe(430);
+        expect(Number((await liveHolds())[0].amount)).toBe(70);
+    });
+
+    it('settles what a hold holds when it is settled, not when the cron listed it', async () => {
+        // The cron lists the due holds first and then settles them one by one; refunds can land in between.
+        const first = await start();
+        const listed = (await liveHolds())[0];
+        await refund(first.id, 30);
+        await (cron as any).settle(listed);
+        // The consultant gets the 70 remainder, not the 100 the hold held when listed.
+        expect(await balance(CONSULTANT)).toBe(70);
+        expect((await balance(CLIENT)) + (await balance(CONSULTANT))).toBe(500);
+
+        const second = await start();
+        const listedSecond = (await liveHolds()).find((hold) => hold.id === second.id);
+        await refund(second.id);
+        await (cron as any).settle(listedSecond);
+        // Refunded in full meanwhile: nothing left to pay.
+        expect(await balance(CONSULTANT)).toBe(70);
+        expect((await balance(CLIENT)) + (await balance(CONSULTANT))).toBe(500);
+    });
+
+    it('leaves a hold alone at settlement if a refund was requested after the cron listed it', async () => {
+        const first = await start();
+        const listed = (await liveHolds())[0];
+        await refunds.requestRefund(CLIENT, CONSULTANT, first.id);
+        await (cron as any).settle(listed);
+        expect(await balance(CONSULTANT)).toBe(0);
+        expect(await liveHolds()).toHaveLength(1);
     });
 });

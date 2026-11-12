@@ -2,8 +2,9 @@ import { IsBoolean, IsOptional, IsString, MaxLength, MinLength } from 'class-val
 
 /**
  * Deactivation is authorised by re-authentication, not by a session token:
- * either the Clariva password, or - for Google accounts, which have none - a
- * fresh Google ID token verified server-side against the account's email.
+ * either the Clariva password, or - for Google/Apple accounts, which have none -
+ * a fresh Google ID token or Apple identity token verified server-side against
+ * the account's email.
  */
 export class DeactivateAccountDto {
     @IsString()
@@ -21,6 +22,13 @@ export class DeactivateAccountDto {
     @MinLength(20)
     @MaxLength(4096)
     googleIdToken?: string;
+
+    /** For accounts made with Sign in with Apple: a fresh Apple identity token. */
+    @IsString()
+    @IsOptional()
+    @MinLength(20)
+    @MaxLength(8192)
+    appleIdToken?: string;
 
     /** Also erase message content on the homeserver, not just disable the account. */
     @IsBoolean()
