@@ -1,8 +1,9 @@
-import { Controller, Post, Get, Body, Query, Headers, Req, RawBodyRequest } from '@nestjs/common';
+import { Controller, Post, Get, Body, Query, Headers, Req, RawBodyRequest, HttpCode, HttpStatus } from '@nestjs/common';
 import { Request } from 'express';
 import { WalletService } from './wallet.service';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { VerifyPaymentDto } from './dto/verify-payment.dto';
+import { SyncRechargesDto } from './dto/sync-recharges.dto';
 
 @Controller('v1/wallet')
 export class WalletController {
@@ -32,6 +33,20 @@ export class WalletController {
     @Post('verify')
     verifyPayment(@Body() dto: VerifyPaymentDto) {
         return this.walletService.verifyPayment(dto.userId, dto);
+    }
+
+    /**
+     * Credit recharges that Razorpay captured but that were never verified, e.g. when the checkout
+     * was closed while a UPI app completed the payment. Asks Razorpay; idempotent.
+     *
+     * POST /v1/wallet/sync
+     * Body: { userId, transactionId? }
+     * Returns: { success, credited, newBalance }
+     */
+    @Post('sync')
+    @HttpCode(HttpStatus.OK)
+    syncRecharges(@Body() dto: SyncRechargesDto) {
+        return this.walletService.syncRecharges(dto.userId, dto.transactionId);
     }
 
     /**

@@ -5,6 +5,7 @@ import { User } from '../users/user.entity';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { VerifyPaymentDto } from './dto/verify-payment.dto';
 import { ConfigService } from '@nestjs/config';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import Razorpay = require('razorpay');
 import * as crypto from 'crypto';
 
@@ -160,40 +161,8 @@ export class WalletService {
         }
 
         // 3. Update Status and Credit Wallet Atomically
-        return await this.connection.transaction(async (manager) => {
-            // Re-fetch within transaction for safety
-            const [txn] = await manager.query(
-                `SELECT * FROM wallet_transactions WHERE id = ? FOR UPDATE`,
-                [transactionId]
-            );
-            if (txn.status === 'PAID') {
-                const u = await manager.findOne(User, userId);
-                return { success: true, newBalance: u.current_hold, transactionId: String(txn.id) };
-            }
-
-            await manager.query(
-                `UPDATE wallet_transactions SET status = 'PAID', provider_payment_id = ?, provider_signature = ? WHERE id = ?`,
-                [razorpay_payment_id, razorpay_signature, transactionId]
-            );
-
-            const user = await manager.findOne(User, userId, { lock: { mode: 'pessimistic_write' } });
-            if (!user) throw new NotFoundException('User not found');
-
-            const oldBalance = Number(user.current_hold) || 0;
-            user.current_hold = oldBalance + Number(txn.amount);
-            await manager.save(user);
-
-            this.logger.log(`Credited ${txn.amount} to user ${user.Webuddy_name} (ID: ${user.id}). New hold balance: ${user.current_hold}`);
-
-            // Handle Referral Bonus
-            await this.handleReferralBonus(user.id, manager, transactionId);
-
-            return {
-                success: true,
-                newBalance: user.current_hold,
-                transactionId: String(txn.id)
-            };
-        });
+        const credited = await this.creditRecharge(Number(transactionId), razorpay_payment_id, razorpay_signature);
+        return { success: true, newBalance: credited.newBalance, transactionId: String(walletTxn.id) };
     }
 
     async handleWebhook(signature: string, rawBody: string, parsedBody: any) {
@@ -236,27 +205,7 @@ export class WalletService {
             );
 
             if (walletTxn && walletTxn.status !== 'PAID') {
-                await this.connection.transaction(async (manager) => {
-                    const [txn] = await manager.query(
-                        `SELECT * FROM wallet_transactions WHERE id = ? FOR UPDATE`,
-                        [walletTxn.id]
-                    );
-                    if (txn.status === 'PAID') return;
-
-                    await manager.query(
-                        `UPDATE wallet_transactions SET status = 'PAID', provider_payment_id = ? WHERE id = ?`,
-                        [payment.id, txn.id]
-                    );
-
-                    const user = await manager.findOne(User, txn.user_id, { lock: { mode: 'pessimistic_write' } });
-                    if (user) {
-                        const oldHold = (Number(user.current_hold) || 0);
-                        user.current_hold = oldHold + Number(txn.amount);
-                        await manager.save(user);
-                        this.logger.log(`Webhook: Credited ${txn.amount} to user ${user.Webuddy_name}. New hold balance: ${user.current_hold}`);
-                        await this.handleReferralBonus(user.id, manager, txn.id);
-                    }
-                });
+                await this.creditRecharge(walletTxn.id, payment.id);
             }
         } else if (event === 'payment.failed') {
             const payment = payload.payment.entity;
@@ -268,6 +217,143 @@ export class WalletService {
         }
 
         return { status: 'ok' };
+    }
+
+    /**
+     * Marks a recharge PAID and credits its amount, exactly once: verify, the webhook and the
+     * reconciliation below can all report the same payment, in any order.
+     */
+    private async creditRecharge(txnId: number, paymentId: string, signature: string | null = null): Promise<{ credited: boolean; newBalance: number | null }> {
+        return this.connection.transaction(async (manager) => {
+            const [txn] = await manager.query(
+                `SELECT * FROM wallet_transactions WHERE id = ? FOR UPDATE`,
+                [txnId]
+            );
+            if (!txn) throw new NotFoundException('Transaction not found');
+            if (txn.status === 'PAID') {
+                const u = await manager.findOne(User, txn.user_id);
+                return { credited: false, newBalance: u ? Number(u.current_hold) : null };
+            }
+
+            await manager.query(
+                `UPDATE wallet_transactions SET status = 'PAID', provider_payment_id = ?, provider_signature = COALESCE(?, provider_signature) WHERE id = ?`,
+                [paymentId, signature, txn.id]
+            );
+
+            const user = await manager.findOne(User, txn.user_id, { lock: { mode: 'pessimistic_write' } });
+            if (!user) throw new NotFoundException('User not found');
+
+            const oldBalance = Number(user.current_hold) || 0;
+            user.current_hold = oldBalance + Number(txn.amount);
+            await manager.save(user);
+
+            this.logger.log(`Credited ${txn.amount} to user ${user.Webuddy_name} (ID: ${user.id}) for recharge ${txn.id}. New hold balance: ${user.current_hold}`);
+
+            await this.handleReferralBonus(user.id, manager, txn.id);
+
+            return { credited: true, newBalance: Number(user.current_hold) };
+        });
+    }
+
+    /**
+     * Asks Razorpay whether a recharge order was paid, and credits it if so.
+     *
+     * The app only learns of a payment through the checkout's success callback, which never fires
+     * when the checkout is closed while a UPI app finishes the payment, or when the app is killed
+     * meanwhile; the webhook is the other path, and it may be missing or late. Razorpay's own record
+     * of the order is the source of truth here, so this needs no signature from the client.
+     *
+     * Returns whether this call credited it.
+     */
+    private async reconcileRecharge(txn: { id: number; amount: any; provider_order_id: string }): Promise<boolean> {
+        let payments: any[];
+        try {
+            const response = await this.razorpay.orders.fetchPayments(txn.provider_order_id);
+            payments = (response && response.items) || [];
+        } catch (error) {
+            this.logger.warn(`Could not fetch Razorpay payments for order ${txn.provider_order_id}: ${error?.error?.description || error?.message || error}`);
+            return false;
+        }
+
+        const expectedPaise = Math.round(Number(txn.amount) * 100);
+        const captured = payments.find((payment) =>
+            payment &&
+            payment.status === 'captured' &&
+            payment.order_id === txn.provider_order_id &&
+            Number(payment.amount) === expectedPaise &&
+            payment.currency === 'INR'
+        );
+        if (!captured) return false;
+
+        const result = await this.creditRecharge(txn.id, captured.id);
+        if (result.credited) {
+            this.logger.log(`Reconciled recharge ${txn.id}: Razorpay payment ${captured.id} was captured but never credited`);
+        }
+        return result.credited;
+    }
+
+    /** Unfinished recharges are looked up at Razorpay for this long after they were created. */
+    private static readonly RECONCILE_WINDOW_HOURS = 72;
+
+    /**
+     * Credits a user's recent recharges that Razorpay captured but this server never heard of
+     * (see reconcileRecharge). The app calls this when the checkout closes without a verified
+     * payment and whenever the wallet is opened. Idempotent.
+     *
+     * POST /v1/wallet/sync
+     */
+    async syncRecharges(identifier: string, transactionId?: number) {
+        const user = await this.resolveUserIdentifier(identifier);
+
+        const params: any[] = [user.id];
+        let onlyThis = '';
+        if (transactionId) {
+            onlyThis = 'AND id = ?';
+            params.push(transactionId);
+        }
+        const pending = await this.connection.query(
+            `SELECT id, amount, provider_order_id FROM wallet_transactions
+             WHERE user_id = ? ${onlyThis}
+               AND source = 'RECHARGE' AND provider = 'RAZORPAY'
+               AND status IN ('CREATED', 'FAILED') AND provider_order_id IS NOT NULL
+               AND created_at > DATE_SUB(NOW(), INTERVAL ${WalletService.RECONCILE_WINDOW_HOURS} HOUR)
+             ORDER BY created_at DESC
+             LIMIT 10`,
+            params
+        );
+
+        let credited = 0;
+        for (const txn of pending) {
+            if (await this.reconcileRecharge(txn)) credited++;
+        }
+
+        const fresh = await this.usersRepository.findOne(user.id);
+        return { success: true, credited, newBalance: Number(fresh.current_hold) || 0 };
+    }
+
+    /**
+     * The same for every user, every few minutes, so a paid recharge is credited even when
+     * neither the app nor the webhook reports it (older app builds, Android, web).
+     */
+    @Cron(CronExpression.EVERY_5_MINUTES)
+    async reconcileRecentRecharges() {
+        try {
+            // Orders younger than two minutes are usually still in the checkout.
+            const pending = await this.connection.query(
+                `SELECT id, amount, provider_order_id FROM wallet_transactions
+                 WHERE source = 'RECHARGE' AND provider = 'RAZORPAY'
+                   AND status IN ('CREATED', 'FAILED') AND provider_order_id IS NOT NULL
+                   AND created_at < DATE_SUB(NOW(), INTERVAL 2 MINUTE)
+                   AND created_at > DATE_SUB(NOW(), INTERVAL ${WalletService.RECONCILE_WINDOW_HOURS} HOUR)
+                 ORDER BY created_at DESC
+                 LIMIT 50`
+            );
+            for (const txn of pending) {
+                await this.reconcileRecharge(txn);
+            }
+        } catch (error) {
+            this.logger.error(`Recharge reconciliation failed: ${error.message}`);
+        }
     }
 
     private async handleReferralBonus(userId: string, manager: EntityManager, rechargeTxnId: number) {

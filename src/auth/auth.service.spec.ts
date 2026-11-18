@@ -6,6 +6,10 @@ import { User } from '../users/user.entity';
 import { MatrixService, matrixUsernameTakenException } from '../matrix/matrix.service';
 import { AuthService } from './auth.service';
 import { GoogleTokenVerifier } from './google-token-verifier';
+import { AppleTokenVerifier } from './apple-token-verifier';
+import { MailService } from './mail.service';
+import { PasswordReset } from './password-reset.entity';
+import { ConfigService } from '@nestjs/config';
 
 jest.setTimeout(30000); // scrypt is deliberately slow
 
@@ -63,6 +67,10 @@ async function build(repo: any, matrixEnabled = true) {
             { provide: JwtService, useValue: { signAsync: async () => 'jwt.token.here' } },
             { provide: MatrixService, useValue: matrix },
             { provide: GoogleTokenVerifier, useValue: google },
+            { provide: AppleTokenVerifier, useValue: { verify: jest.fn() } },
+            { provide: getRepositoryToken(PasswordReset), useValue: makeRepo() },
+            { provide: MailService, useValue: { sendPasswordResetCode: jest.fn() } },
+            { provide: ConfigService, useValue: { get: () => 'test-secret' } },
         ],
     }).compile();
     return { service: module.get<AuthService>(AuthService), matrix, google };

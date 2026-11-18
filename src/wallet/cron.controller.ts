@@ -1,12 +1,14 @@
 import { Controller, Post, Get, HttpCode, HttpStatus } from '@nestjs/common';
 import { PendingHoldsCronService } from './pending-holds-cron.service';
 import { PayoutsService } from '../payouts/payouts.service';
+import { WalletService } from './wallet.service';
 
 @Controller('v1/wallet/cron')
 export class CronController {
     constructor(
         private readonly pendingHoldsCronService: PendingHoldsCronService,
-        private readonly payoutsService: PayoutsService
+        private readonly payoutsService: PayoutsService,
+        private readonly walletService: WalletService,
     ) { }
 
     @Get()
@@ -20,12 +22,28 @@ export class CronController {
                     manualTrigger: '/v1/wallet/cron/pending-holds/trigger'
                 },
                 {
+                    name: 'RechargeReconciliation',
+                    description: 'Credits recharges Razorpay captured that were never verified (last 72 hours)',
+                    schedule: 'Every 5 Minutes',
+                    manualTrigger: '/v1/wallet/cron/recharges/trigger'
+                },
+                {
                     name: 'MonthlyPayouts',
                     description: 'Processes automated payouts for experts who meet the threshold (1st of month)',
                     schedule: 'Monthly (1st at Midnight)',
                     manualTrigger: '/v1/wallet/cron/monthly-payouts/trigger'
                 }
             ]
+        };
+    }
+
+    @Post('recharges/trigger')
+    @HttpCode(HttpStatus.OK)
+    async triggerRechargeReconciliation() {
+        await this.walletService.reconcileRecentRecharges();
+        return {
+            message: 'Recharge reconciliation triggered successfully',
+            timestamp: new Date().toISOString()
         };
     }
 
